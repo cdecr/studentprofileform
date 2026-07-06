@@ -76,6 +76,8 @@ input, select, textarea {
   width: 100%; min-width: 0; max-width: 100%; border: 1px solid #c8dce1; border-radius: 8px; padding: 11px 12px; background: #fff; color: var(--ink); min-height: 44px;
 }
 input[type="file"] { padding: 8px; overflow: hidden; }
+.existing-document { display: none; margin-top: 7px; color: #27685f; font-size: .84rem; font-weight: 700; }
+.existing-document.visible { display: block; }
 select[multiple] { min-height: 148px; padding: 8px; }
 select[multiple] option { padding: 8px 9px; border-radius: 5px; }
 textarea { min-height: 104px; resize: vertical; }
@@ -111,6 +113,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 3px s
 .student-status { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #9bc9d1; border-radius: 6px; background: #fff; color: var(--accent-dark); font-size: .78rem; font-weight: 800; }
 .documents-note { display: flex; gap: 7px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #d2e7eb; font-size: .86rem; line-height: 1.42; }
 .documents-note strong { white-space: nowrap; }
+.draft-status { flex: 1 1 150px; color: var(--muted); font-size: .82rem; text-align: center; }
 .student-search-panel { margin-bottom: 22px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .student-search-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .student-search-title h3 { margin: 0; font-size: 1rem; }
