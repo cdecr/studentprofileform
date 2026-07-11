@@ -171,6 +171,32 @@ function lookupStudent(studentId, verificationBirthYear) {
         fatherId: cleanLegacyId(legacyValue(headers, row, ['Tutor 2 identificación','fatherIdNumber','fatherId'])),
         additionalInfo: legacyValue(headers, row, ['notas','Notas','additionalInfo'])
       };
+      const tutor1 = splitPersonName(record.motherName);
+      const tutor2 = splitPersonName(record.fatherName);
+      Object.assign(record, {
+        'legalGuardians.0.firstName': tutor1.firstName,
+        'legalGuardians.0.lastName1': tutor1.lastName1,
+        'legalGuardians.0.lastName2': tutor1.lastName2,
+        'legalGuardians.0.relationship': legacyValue(headers, row, ['tutor1_relacion','Tutor 1 relación']) || 'Madre',
+        'legalGuardians.0.phoneCode': record.motherPhoneCode || '+506',
+        'legalGuardians.0.phone': record.motherPhone || '',
+        'legalGuardians.0.email': record.motherEmail || '',
+        'legalGuardians.0.sameAddress': record.currentAddressDetails ? 'yes' : '',
+        'legalGuardians.0.livesWithStudent': normalizeYesNo(legacyValue(headers, row, ['tutor1_vive_con_estudiante','Tutor 1 vive con estudiante'])) || '',
+        'legalGuardians.0.isEmergencyContact': record.motherPhone ? 'yes' : '',
+        'legalGuardians.0.emergencyPriority': record.motherPhone ? 'Principal' : '',
+        'legalGuardians.1.firstName': tutor2.firstName,
+        'legalGuardians.1.lastName1': tutor2.lastName1,
+        'legalGuardians.1.lastName2': tutor2.lastName2,
+        'legalGuardians.1.relationship': legacyValue(headers, row, ['tutor2_relacion','Tutor 2 relación']) || (record.fatherName ? 'Padre' : ''),
+        'legalGuardians.1.phoneCode': record.fatherPhoneCode || '+506',
+        'legalGuardians.1.phone': record.fatherPhone || '',
+        'legalGuardians.1.email': record.fatherEmail || '',
+        'legalGuardians.1.sameAddress': record.currentAddressDetails && record.fatherName ? 'yes' : '',
+        'legalGuardians.1.livesWithStudent': normalizeYesNo(legacyValue(headers, row, ['tutor2_vive_con_estudiante','Tutor 2 vive con estudiante'])) || '',
+        'legalGuardians.1.isEmergencyContact': record.fatherPhone ? 'yes' : '',
+        'legalGuardians.1.emergencyPriority': record.fatherPhone ? 'Secundario' : ''
+      });
       record.existingDocumentDetails = getExistingDocumentDetails(ss, record.studentId);
       record.existingDocumentFields = uniqueValues(record.existingDocumentDetails.map(item => item.field));
       return { ok: true, data: record };
@@ -188,6 +214,14 @@ function splitLegacyLastNames(value) {
   const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
   if (parts.length < 2) return { first: parts[0] || '', second: 'No registrado' };
   return { first: parts.slice(0, -1).join(' '), second: parts[parts.length - 1] };
+}
+
+function splitPersonName(value) {
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { firstName: '', lastName1: '', lastName2: '' };
+  if (parts.length === 1) return { firstName: parts[0], lastName1: '', lastName2: '' };
+  if (parts.length === 2) return { firstName: parts[0], lastName1: parts[1], lastName2: '' };
+  return { firstName: parts.slice(0, -2).join(' '), lastName1: parts[parts.length - 2], lastName2: parts[parts.length - 1] };
 }
 
 function formatDateForForm(value) {
@@ -264,6 +298,14 @@ function normalizeYesNoNa(value) {
   if (['si','yes','true','x'].indexOf(text) >= 0) return 'yes';
   if (['no','false'].indexOf(text) >= 0) return 'no';
   return 'na';
+}
+
+function normalizeYesNo(value) {
+  const text = normalizeName(value);
+  if (!text) return '';
+  if (['si','yes','true','x'].indexOf(text) >= 0) return 'yes';
+  if (['no','false'].indexOf(text) >= 0) return 'no';
+  return '';
 }
 
 function splitPhone(value) {
