@@ -44,7 +44,7 @@ Create one private root folder in Google Drive for student admission files. Copy
 
 Each new student creates a folder named like:
 
-`Sofia Ramirez Gonzalez - CDE260801`
+`Sofia Ramirez Gonzalez - RG06S17`
 
 Existing students reuse their profile and the same Drive folder.
 
@@ -117,9 +117,9 @@ with the Web App URL from Apps Script.
 
 ## Existing student profiles and reports
 
-At the beginning of the first section, families enter the internal student code, date of birth and surname. Apps Script verifies all three values before returning existing information from `Base_Admisiones` or `Historial_Estudiantes`. The student's name, surnames and current grade appear first so the family can confirm the correct profile before continuing. All dates are selected with separate day, month and year dropdowns to avoid regional date-format ambiguity.
+At the beginning of the first section, families enter the new student code and birth year. Apps Script verifies both values before returning existing information from `Base_Admisiones` or `Historial_Estudiantes`. The student's name, surnames and current grade appear first so the family can confirm the correct profile before continuing. All dates are selected with separate day, month and year dropdowns to avoid regional date-format ambiguity.
 
-New internal codes use `CDE + two-digit admission year + two-digit birth month + two-digit sequence`. Example: `CDE260801` means admission year 2026, birth month August, sequence 01. Previous `CDE01XXX` codes remain valid for existing records.
+New student codes use this format: first letter of first surname + first letter of second surname, birth day, first letter of first name, and last two digits of birth year. Example: `RG06L17` for Luciana Rojas Gonzalez, born on 06/08/2017. When a student does not have a second surname in the source data, the temporary letter `X` is used and the row is marked for review.
 
 The worksheet containing the profiles must be named exactly `Historial_Estudiantes`. Do not upload this private workbook to GitHub.
 
