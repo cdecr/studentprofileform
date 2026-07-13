@@ -52,7 +52,7 @@ function handleSubmission(payload) {
   const baseRow = buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs);
   upsertObject(ss.getSheetByName('Base_Admisiones'), baseRow, 'studentId');
   appendDocuments(ss.getSheetByName('Documentos'), studentId, savedFiles);
-  appendObject(ss.getSheetByName('Salud'), pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','hasMedicalCondition','medicalConditionDetail','hasAllergies','allergyDetail','takesMedication','medicationName','medicationDose','medicationFrequency','medicationNotes','hasPhysicalRestriction','physicalRestrictionDetail','hasLearningCondition','learningConditionDetail','healthNotes']));
+  appendObject(ss.getSheetByName('Salud'), pickHealth(data));
   appendObject(ss.getSheetByName('Cocina'), pickDiet(data));
   appendObject(ss.getSheetByName('Autorizaciones'), pick(data, ['studentId','fullName','confirmTruth','confirmDataUse','confirmContact','imageChoice','confirmRead','confirmNoGuarantee','confirmSubmit','completedBy','completedByRelation','submissionDate','digitalSignature','reviewConfirmed']));
   appendObject(ss.getSheetByName('Vacunas'), pickVaccines(data));
@@ -228,6 +228,13 @@ function formatDateForForm(value) {
   if (!value) return '';
   const iso = String(value).match(/^\d{4}-\d{2}-\d{2}/);
   if (iso) return iso[0];
+  const slashDate = String(value).trim().match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if (slashDate) {
+    const day = slashDate[1].padStart(2, '0');
+    const month = slashDate[2].padStart(2, '0');
+    const year = slashDate[3];
+    return `${year}-${month}-${day}`;
+  }
   const numericSerial = typeof value === 'number' ? value : (/^\d{5}(\.\d+)?$/.test(String(value).trim()) ? Number(value) : 0);
   if (numericSerial > 20000) {
     const date = new Date(Date.UTC(1899, 11, 30) + numericSerial * 24 * 60 * 60 * 1000);
@@ -554,7 +561,8 @@ function getPendingDocuments(data, files, ss, studentId) {
     studentIdFile: 'Identificación o pasaporte del estudiante',
     studentPhoto: 'Foto reciente del estudiante',
     guardianIdFiles: 'Identificación de madre, padre o tutor legal',
-    birthCertificate: 'Certificado de nacimiento'
+    birthCertificate: 'Certificado de nacimiento',
+    vaccineDocs: 'Carné de vacunas o consentimiento/declaración firmada'
   };
   return Object.keys(required).filter(field => !present[field] && data[field] !== 'yes').map(field => required[field]);
 }
@@ -715,15 +723,30 @@ function createPdfReport(title, paragraphs, folder, signature) {
 }
 
 function sendFamilyReports(data, reports) {
-  const recipients = uniqueValues([data.motherEmail, data.fatherEmail].map(value => String(value || '').trim().toLowerCase()));
+  const recipients = getFamilyRecipientEmails(data);
   if (!recipients.length || !reports.length) return;
   const attachments = reports.map(report => DriveApp.getFileById(report.id).getBlob());
   MailApp.sendEmail({
     to: recipients.join(','),
     subject: `Resumen de admisión - ${data.legalFullName || data.fullName || 'Estudiante'} - Casa de las Estrellas`,
-    body: ['Adjuntamos el resumen de la solicitud y las autorizaciones registradas durante el proceso de admisión. Conserve este documento para sus registros.','',buildDeclarationSummary(data)].join('\n'),
+    body: [
+      'Adjuntamos el resumen de la solicitud y las autorizaciones registradas durante el proceso de admisión. Conserve este documento para sus registros.',
+      '',
+      buildDeclarationSummary(data),
+      '',
+      buildNextSteps()
+    ].join('\n'),
     attachments
   });
+}
+
+function getFamilyRecipientEmails(data) {
+  const recipients = [];
+  Object.keys(data).forEach(key => {
+    if (/^legalGuardians\.\d+\.email$/.test(key) && data[key]) recipients.push(data[key]);
+  });
+  [data.motherEmail, data.fatherEmail].forEach(value => { if (value) recipients.push(value); });
+  return uniqueValues(recipients.map(value => String(value || '').trim().toLowerCase()).filter(Boolean));
 }
 
 function buildDeclarationSummary(data) {
@@ -763,7 +786,9 @@ function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, report
     'Documentos pendientes:',
     pendingDocs.length ? pendingDocs.map(d => `- ${d}`).join('\n') : '- Sin pendientes',
     '',
-    buildDeclarationSummary(data)
+    buildDeclarationSummary(data),
+    '',
+    buildNextSteps()
   ].join('\n');
   const attachments = (reports || []).map(report => DriveApp.getFileById(report.id).getBlob());
   MailApp.sendEmail({ to, subject, body, attachments });
@@ -775,10 +800,26 @@ function pick(data, keys) {
   return obj;
 }
 
+function pickHealth(data) {
+  const obj = pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','hasMedicalCondition','medicalConditionDetail','hasAllergies','allergyDetail','takesMedication','medicationName','medicationDose','medicationFrequency','medicationNotes','hasPhysicalRestriction','physicalRestrictionDetail','hasLearningCondition','learningConditionDetail','healthOther','hospitalized','hospitalizationReasons','healthNotes']);
+  Object.keys(data).forEach(k => { if (k.indexOf('health_') === 0) obj[k] = data[k]; });
+  return obj;
+}
+
 function pickDiet(data) {
-  const obj = pick(data, ['studentId','fullName','dietType','dietOther','foodAllergies','foodRestrictions','dietAdditional','schoolMealNotes']);
+  const obj = pick(data, ['studentId','fullName','dietType','eatsEggs','foodAllergies','foodRestrictions','mealAppetite','foodTexture','kitchenSupport','canUseUtensils','drinksMilk','schoolMealNotes']);
   Object.keys(data).forEach(k => { if (k.indexOf('diet_') === 0) obj[k] = data[k]; });
   return obj;
+}
+
+function buildNextSteps() {
+  return [
+    'Próximos pasos:',
+    '- El equipo de Casa de las Estrellas revisará la información y los documentos adjuntos.',
+    '- Si falta algún documento o aclaración, nos comunicaremos con la familia.',
+    '- Una vez revisado el expediente, admisiones indicará los siguientes pasos del proceso.',
+    '- El envío del formulario no garantiza admisión ni reserva de cupo hasta completar la revisión correspondiente.'
+  ].join('\n');
 }
 
 function pickVaccines(data) {
