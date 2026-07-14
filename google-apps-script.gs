@@ -152,6 +152,9 @@ function lookupStudent(studentId, verificationBirthYear) {
         homeLanguage: legacyValue(headers, row, ['idioma_principal','Idioma principal','homeLanguage']),
         hasAllergies,
         allergyDetail: allergyOrDiet,
+        has_food_restrictions: hasAllergies,
+        food_allergy_or_restriction: hasAllergies === 'yes' ? allergyOrDiet : '',
+        foods_to_avoid: hasAllergies === 'yes' ? allergyOrDiet : '',
         dietType,
         dietDetail: allergyOrDiet,
         eatsEggs: normalizeYesNoNa(legacyValue(headers, row, ['vegetariano_consume_huevo','eatsEggs'])),
@@ -178,6 +181,9 @@ function lookupStudent(studentId, verificationBirthYear) {
         'legalGuardians.0.lastName1': tutor1.lastName1,
         'legalGuardians.0.lastName2': tutor1.lastName2,
         'legalGuardians.0.relationship': legacyValue(headers, row, ['tutor1_relacion','Tutor 1 relación']) || 'Madre',
+        'legalGuardians.0.citizenship': record.motherCitizenship || '',
+        'legalGuardians.0.idType': inferIdType(record.motherId),
+        'legalGuardians.0.idNumber': record.motherId || '',
         'legalGuardians.0.phoneCode': record.motherPhoneCode || '+506',
         'legalGuardians.0.phone': record.motherPhone || '',
         'legalGuardians.0.email': record.motherEmail || '',
@@ -189,6 +195,9 @@ function lookupStudent(studentId, verificationBirthYear) {
         'legalGuardians.1.lastName1': tutor2.lastName1,
         'legalGuardians.1.lastName2': tutor2.lastName2,
         'legalGuardians.1.relationship': legacyValue(headers, row, ['tutor2_relacion','Tutor 2 relación']) || (record.fatherName ? 'Padre' : ''),
+        'legalGuardians.1.citizenship': record.fatherCitizenship || '',
+        'legalGuardians.1.idType': inferIdType(record.fatherId),
+        'legalGuardians.1.idNumber': record.fatherId || '',
         'legalGuardians.1.phoneCode': record.fatherPhoneCode || '+506',
         'legalGuardians.1.phone': record.fatherPhone || '',
         'legalGuardians.1.email': record.fatherEmail || '',
@@ -807,9 +816,17 @@ function pickHealth(data) {
 }
 
 function pickDiet(data) {
-  const obj = pick(data, ['studentId','fullName','dietType','eatsEggs','foodAllergies','foodRestrictions','mealAppetite','foodTexture','kitchenSupport','canUseUtensils','drinksMilk','schoolMealNotes']);
-  Object.keys(data).forEach(k => { if (k.indexOf('diet_') === 0) obj[k] = data[k]; });
-  return obj;
+  return pick(data, [
+    'studentId',
+    'fullName',
+    'has_food_restrictions',
+    'food_allergy_or_restriction',
+    'foods_to_avoid',
+    'dairy_alternative_notes',
+    'meat_alternative_notes',
+    'religious_cultural_food_restrictions',
+    'kitchen_safety_instructions'
+  ]);
 }
 
 function buildNextSteps() {
