@@ -15,6 +15,10 @@ function doPost(e) {
   try {
     const payload = JSON.parse(e.postData.contents || '{}');
     if (payload.action === 'lookupStudent') return jsonOutput(lookupStudent(payload.studentId, payload.verificationBirthYear || payload.verificationBirthDate));
+    if (payload.action === 'syncDashboardData' || payload.action === 'getDashboardData') return jsonOutput(syncDashboardData());
+    if (payload.action === 'sendFormLink') return jsonOutput(sendFormLink(payload.student_id || payload.studentId, payload.form_type || payload.formType, payload.email, payload.public_base_url || payload.publicBaseUrl));
+    if (payload.action === 'sendFormReminder') return jsonOutput(sendFormReminder(payload.student_id || payload.studentId, payload.form_type || payload.formType, payload.email, payload.public_base_url || payload.publicBaseUrl));
+    if (payload.action === 'updatePaymentStatus') return jsonOutput(updatePaymentStatus(payload.student_id || payload.studentId, payload.payment_type || payload.paymentType, payload.status, payload));
     return jsonOutput(handleSubmission(payload));
   } catch (error) {
     logError(error);
@@ -31,10 +35,13 @@ function handleSubmission(payload) {
   const spreadsheetId = requireProp(props, 'SPREADSHEET_ID');
   const rootFolderId = requireProp(props, 'DRIVE_ROOT_FOLDER_ID');
   const admissionsEmail = buildInternalRecipients(props);
+  const financeEmail = buildFinanceRecipients(props);
   const ss = SpreadsheetApp.openById(spreadsheetId);
   ensureTabs(ss);
 
   const data = payload.data || {};
+  const submissionId = sanitizeSubmissionId(payload.submissionId || data.submissionId || '');
+  data.submissionId = submissionId;
   const studentId = data.studentId || nextStudentId(ss, data.studentSince, data.birthDate);
   data.studentId = studentId;
   assertNoDuplicateProfile(ss.getSheetByName('Base_Admisiones'), data, studentId);
@@ -46,7 +53,7 @@ function handleSubmission(payload) {
   const folderName = sanitizeFileName(fullName + ' - ' + studentId);
   const studentFolder = getOrCreateStudentFolder(ss, root, studentId, folderName);
   const subfolders = getOrCreateSubfolders(studentFolder);
-  const savedFiles = saveFiles(payload.files || [], subfolders);
+  const savedFiles = saveFiles(payload.files || [], subfolders, submissionId);
   const reportFiles = createFamilyReports(data, studentId, subfolders, savedFiles);
   reportFiles.forEach(file => savedFiles.push(file));
   const finalDeclaration = reportFiles.filter(file => file.field === 'finalDeclaration')[0];
@@ -66,16 +73,28 @@ function handleSubmission(payload) {
   configureAdmissionsDashboard(ss.getSheetByName('Dashboard_Admisiones'));
   appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: data.entryType === 'existing' ? 'profile_updated' : 'submission_created', studentId, fullName, files: savedFiles.length });
 
-  sendNotification(admissionsEmail, data, studentFolder, savedFiles, pendingDocs, ss.getUrl(), reportFiles);
-  data.internal_notification_email_sent = new Date();
+  try {
+    sendNotification(admissionsEmail, data, studentFolder, savedFiles, pendingDocs, ss.getUrl(), reportFiles);
+    data.internal_notification_email_sent = new Date();
+  } catch (internalEmailError) {
+    data.internal_notification_email_sent = 'Error: ' + String(internalEmailError);
+    appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'internal_notification_email_error', studentId, submissionId, message: String(internalEmailError) });
+  }
+  try {
+    sendFinanceNotificationIfNeeded(financeEmail, data, studentFolder, ss.getUrl());
+    if (data.paymentPlan === 'monthly_request') data.finance_notification_email_sent = new Date();
+  } catch (financeEmailError) {
+    data.finance_notification_email_sent = 'Error: ' + String(financeEmailError);
+    appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'finance_notification_email_error', studentId, submissionId, message: String(financeEmailError) });
+  }
   try {
     sendFamilyReports(data, reportFiles, savedFiles);
     data.parent_confirmation_email_sent = new Date();
   } catch (familyEmailError) {
     appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'family_report_email_error', studentId, message: String(familyEmailError) });
   }
-  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent']), 'studentId');
-  return { ok: true, studentId, folderUrl: studentFolder.getUrl(), files: savedFiles.length, pending: pendingDocs };
+  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','submissionId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent','finance_notification_email_sent']), 'studentId');
+  return { ok: true, studentId, folderUrl: studentFolder.getUrl(), files: savedFiles.length, pending: pendingDocs, submissionId };
 }
 
 function lookupStudent(studentId, verificationBirthYear) {
@@ -219,6 +238,102 @@ function lookupStudent(studentId, verificationBirthYear) {
     }
   }
   return { ok: false, data: null, reason: foundCode ? 'verification_failed' : 'not_found' };
+}
+
+function syncDashboardData() {
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
+  ensureTabs(ss);
+  const base = sheetObjects(ss.getSheetByName('Base_Admisiones'));
+  const dashboard = sheetObjects(ss.getSheetByName('Dashboard_Admisiones'));
+  const documents = sheetObjects(ss.getSheetByName('Documentos'));
+  const pending = sheetObjects(ss.getSheetByName('Pendientes'));
+  const driveFolders = sheetObjects(ss.getSheetByName('Drive_Folders'));
+  const health = latestByStudent(sheetObjects(ss.getSheetByName('Salud')));
+  const kitchen = latestByStudent(sheetObjects(ss.getSheetByName('Cocina')));
+  const byId = {};
+  base.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) byId[id] = Object.assign(byId[id] || {}, row);
+  });
+  dashboard.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) byId[id] = Object.assign(byId[id] || {}, row);
+  });
+  driveFolders.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) byId[id] = Object.assign(byId[id] || {}, row);
+  });
+  const documentMap = groupByStudent(documents);
+  const pendingMap = groupByStudent(pending);
+  const records = Object.keys(byId).sort().map(id => dashboardRecordFromRows(id, byId[id], documentMap[id] || [], pendingMap[id] || [], health[id] || {}, kitchen[id] || {}));
+  return { ok: true, records, generatedAt: new Date() };
+}
+
+function sendFormLink(studentId, formType, email, publicBaseUrl) {
+  return sendDashboardFormEmail('link', studentId, formType, email, publicBaseUrl);
+}
+
+function sendFormReminder(studentId, formType, email, publicBaseUrl) {
+  return sendDashboardFormEmail('reminder', studentId, formType, email, publicBaseUrl);
+}
+
+function sendDashboardFormEmail(kind, studentId, formType, email, publicBaseUrl) {
+  if (!studentId || !formType) return { ok: false, error: 'Missing student_id or form_type' };
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
+  ensureTabs(ss);
+  const record = findRowObject(ss.getSheetByName('Base_Admisiones'), 'studentId', studentId) || findRowObject(ss.getSheetByName('Dashboard_Admisiones'), 'studentId', studentId) || {};
+  const to = email || record['legalGuardians.0.email'] || record.guardian_email || record.email || props.getProperty('ADMISSIONS_EMAIL') || Session.getActiveUser().getEmail();
+  if (!to) return { ok: false, error: 'Missing recipient email' };
+  const formUrl = buildPublicFormUrl(formType, publicBaseUrl, props);
+  const studentName = record.fullName || record.student_name || record.studentName || studentId;
+  const subject = kind === 'reminder' ? `Recordatorio de formulario - Casa de las Estrellas` : `Formulario Casa de las Estrellas`;
+  const body = [
+    'Hola,',
+    '',
+    kind === 'reminder' ? 'Le recordamos completar el siguiente formulario:' : 'Por favor complete el siguiente formulario:',
+    '',
+    formUrl,
+    '',
+    `Estudiante: ${studentName}`,
+    `Código: ${studentId}`,
+    '',
+    'Gracias,',
+    'Casa de las Estrellas'
+  ].join('\n');
+  MailApp.sendEmail({ to, subject, body });
+  const update = kind === 'reminder'
+    ? { studentId, last_reminder_sent_at: new Date(), next_action: 'Recordatorio enviado' }
+    : { studentId, last_form_link_sent: formType, last_form_link_sent_at: new Date(), last_form_link_url: formUrl, next_action: 'Formulario enviado' };
+  upsertObject(ss.getSheetByName('Dashboard_Admisiones'), update, 'studentId');
+  appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: kind === 'reminder' ? 'dashboard_form_reminder_sent' : 'dashboard_form_link_sent', studentId, formType, emailTo: to });
+  return { ok: true, url: formUrl, email_to: to };
+}
+
+function updatePaymentStatus(studentId, paymentType, status, data) {
+  if (!studentId) return { ok: false, error: 'Missing student_id' };
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
+  ensureTabs(ss);
+  const update = {
+    studentId,
+    enrollmentPayment: status || 'Actualizado',
+    paymentType: paymentType || '',
+    paymentUpdatedAt: new Date(),
+    paymentNotes: data && data.notes ? data.notes : ''
+  };
+  upsertObject(ss.getSheetByName('Dashboard_Admisiones'), update, 'studentId');
+  appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'payment_status_updated', studentId, paymentType, status });
+  return { ok: true };
+}
+
+function buildPublicFormUrl(formType, publicBaseUrl, props) {
+  const configured = props.getProperty('FORM_PUBLIC_URL') || props.getProperty('STUDENT_FORM_URL') || 'https://cdecr.github.io/studentprofileform/';
+  if (formType === 'application' || formType === 'reenrollment' || formType === 'documents' || formType === 'legal') return configured;
+  const base = publicBaseUrl || configured;
+  if (/studentprofileform\/?$/i.test(base)) return configured;
+  return String(base).replace(/admin\.html.*$/,'') + 'forms.html?form=' + encodeURIComponent(formType || 'inquiry');
 }
 
 function legacyValue(headers, row, names) {
@@ -400,6 +515,117 @@ function findRowObject(sheet, key, value) {
   return null;
 }
 
+function sheetObjects(sheet) {
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return [];
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(String);
+  return values.slice(1).map(row => {
+    const obj = {};
+    headers.forEach((header, index) => {
+      if (header) obj[header] = row[index];
+    });
+    return obj;
+  });
+}
+
+function latestByStudent(rows) {
+  const map = {};
+  rows.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) map[id] = Object.assign(map[id] || {}, row);
+  });
+  return map;
+}
+
+function groupByStudent(rows) {
+  const map = {};
+  rows.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (!id) return;
+    if (!map[id]) map[id] = [];
+    map[id].push(row);
+  });
+  return map;
+}
+
+function dashboardStudentId(row) {
+  return String(row.studentId || row.student_id || row.codigo_unico_nuevo || row.dashboard_key || '').trim().toUpperCase();
+}
+
+function dashboardRecordFromRows(studentId, row, documents, pending, health, kitchen) {
+  const guardian = primaryGuardianSummary(row);
+  const fullName = row.fullName || row.legalFullName || [row.firstName, row.lastName1, row.lastName2].filter(Boolean).join(' ') || row.student_name || '';
+  const pendingText = pending.map(item => item.pendingDocument || item.status || '').filter(Boolean).join(', ') || row.missingDocuments || row.documentsPending || '';
+  const documentText = documents.map(item => item.name || item.file_name || item.field || '').filter(Boolean).join(', ');
+  const status = normalizeDashboardStatus(row.status || row.current_status || row.entryType || 'En proceso');
+  return Object.assign({}, row, {
+    student_id: studentId,
+    codigo_unico_nuevo: studentId,
+    dashboard_key: studentId + '_' + (row.schoolPeriod || row.school_year || ''),
+    student_name: fullName,
+    student_names: fullName,
+    student_initials: initialsForName(fullName),
+    grade: row.currentGrade || row.grade || row.lastGrade || '',
+    current_status: status,
+    record_type: row.entryType === 'new' ? 'Interesado' : 'Estudiante',
+    guardian_name: guardian.name || row.completedBy || '',
+    guardian_email: guardian.email || '',
+    guardian_phone: guardian.phone || '',
+    photo_preview_url: firstDocumentUrl(documents, ['studentPhoto']),
+    folder_url: row.folderUrl || row.studentFolderUrl || '',
+    studentFolderUrl: row.studentFolderUrl || row.folderUrl || '',
+    documents_summary: documentText,
+    pending_documents: pendingText,
+    needs_review: pendingText,
+    alergias_o_dieta: kitchen.food_allergy_or_restriction || kitchen.foods_to_avoid || health.allergyDetail || '',
+    idioma_principal: row.firstLanguage || row.idioma_principal || '',
+    nacionalidad_pais: row.citizenship || row.nacionalidad_pais || '',
+    identificacion_numerica: row.idNumber || row.identificacion_numerica || '',
+    fecha_nacimiento_dd_mm_yyyy: formatDashboardDate(row.birthDate),
+    'fecha_nacimiento_dd/mm/yyyy': formatDashboardDate(row.birthDate),
+    dia: datePart(row.birthDate, 'day'),
+    mes: datePart(row.birthDate, 'month'),
+    yyyy: datePart(row.birthDate, 'year'),
+    last_form_link_sent: row.last_form_link_sent || '',
+    last_form_link_sent_at: row.last_form_link_sent_at || '',
+    last_reminder_sent_at: row.last_reminder_sent_at || '',
+    next_action: row.next_action || row.followUp || ''
+  });
+}
+
+function normalizeDashboardStatus(value) {
+  const text = String(value || '').toLowerCase();
+  if (/matr[ií]cula completada|matriculado|confirmado|aprobado/.test(text)) return 'Matriculado';
+  if (/pendiente|documento|confirmar/.test(text)) return 'Pendiente de confirmar';
+  if (/inactivo|retirado/.test(text)) return 'Inactivo';
+  return 'En proceso';
+}
+
+function initialsForName(name) {
+  return String(name || '').split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase();
+}
+
+function firstDocumentUrl(documents, fields) {
+  const found = (documents || []).find(item => fields.indexOf(item.field) >= 0);
+  return found ? (found.url || found.file_url || '') : '';
+}
+
+function formatDashboardDate(value) {
+  const iso = normalizeDateValue(value);
+  if (!iso) return '';
+  const parts = iso.split('-');
+  return [parts[2], parts[1], parts[0]].join('/');
+}
+
+function datePart(value, part) {
+  const iso = normalizeDateValue(value);
+  if (!iso) return '';
+  const parts = iso.split('-');
+  if (part === 'day') return parts[2];
+  if (part === 'month') return parts[1];
+  return parts[0];
+}
+
 function ensureTabs(ss) {
   TABS.forEach(name => {
     if (!ss.getSheetByName(name)) ss.insertSheet(name);
@@ -446,11 +672,26 @@ function getOrCreateStudentFolder(ss, root, studentId, folderName) {
   return root.createFolder(folderName);
 }
 
-function saveFiles(files, subfolders) {
+function saveFiles(files, subfolders, submissionId) {
   return files.map(file => {
     const category = SUBFOLDERS.indexOf(file.category) >= 0 ? file.category : '08_Otros documentos';
+    const prefix = submissionId ? submissionId.slice(-10) + ' - ' : '';
+    const fileName = sanitizeFileName(prefix + (file.name || 'archivo'));
+    const existingFile = findFileByName(subfolders[category], fileName);
+    if (existingFile) {
+      return {
+        field: file.field,
+        category,
+        name: existingFile.getName(),
+        mimeType: file.mimeType,
+        size: existingFile.getSize(),
+        url: existingFile.getUrl(),
+        id: existingFile.getId(),
+        reused: true
+      };
+    }
     const bytes = Utilities.base64Decode(file.base64);
-    const blob = Utilities.newBlob(bytes, file.mimeType || 'application/octet-stream', sanitizeFileName(file.name || 'archivo'));
+    const blob = Utilities.newBlob(bytes, file.mimeType || 'application/octet-stream', fileName);
     const driveFile = subfolders[category].createFile(blob);
     return {
       field: file.field,
@@ -464,6 +705,11 @@ function saveFiles(files, subfolders) {
   });
 }
 
+function findFileByName(folder, fileName) {
+  const files = folder.getFilesByName(fileName);
+  return files.hasNext() ? files.next() : null;
+}
+
 function buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs) {
   const row = Object.assign({}, data);
   savedFiles.forEach(function(file) {
@@ -473,6 +719,7 @@ function buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs) {
     if (file.field === 'finalDeclaration') row.final_declaration_url = file.url || row.final_declaration_url || '';
   });
   row.submittedAt = payload.submittedAt || new Date();
+  row.submissionId = data.submissionId || payload.submissionId || '';
   row.language = payload.language || '';
   row.studentFolderUrl = studentFolder.getUrl();
   row.documentsReceived = savedFiles.map(f => f.field + ': ' + f.name).join('\n');
@@ -492,7 +739,26 @@ function applySubmissionAliases(data) {
 }
 
 function appendDocuments(sheet, studentId, files) {
-  files.forEach(file => appendObject(sheet, Object.assign({ studentId, uploadedAt: new Date() }, file)));
+  files.forEach(file => {
+    if (!documentRowExists(sheet, studentId, file)) appendObject(sheet, Object.assign({ studentId, uploadedAt: new Date() }, file));
+  });
+}
+
+function documentRowExists(sheet, studentId, file) {
+  if (!sheet || sheet.getLastRow() < 2) return false;
+  const values = sheet.getDataRange().getDisplayValues();
+  const headers = values[0];
+  const studentIndex = headers.indexOf('studentId');
+  const fieldIndex = headers.indexOf('field');
+  const idIndex = headers.indexOf('id');
+  const nameIndex = headers.indexOf('name');
+  if (studentIndex < 0) return false;
+  return values.slice(1).some(row => {
+    const sameStudent = String(row[studentIndex] || '').trim().toUpperCase() === String(studentId || '').trim().toUpperCase();
+    const sameId = idIndex >= 0 && file.id && String(row[idIndex] || '') === String(file.id);
+    const sameFieldName = fieldIndex >= 0 && nameIndex >= 0 && String(row[fieldIndex] || '') === String(file.field || '') && String(row[nameIndex] || '') === String(file.name || '');
+    return sameStudent && (sameId || sameFieldName);
+  });
 }
 
 function appendPending(sheet, studentId, pendingDocs) {
@@ -679,14 +945,19 @@ function createFamilyReports(data, studentId, subfolders, savedFiles) {
   const templateId = PropertiesService.getScriptProperties().getProperty('DECLARATION_TEMPLATE_ID');
   if (!templateId) throw new Error('Missing Script Property: DECLARATION_TEMPLATE_ID');
   const signature = savedFiles.find(file => file.field === 'digitalSignatureFile');
+  const suffix = data.submissionId ? ' - ' + data.submissionId.slice(-10) : '';
   return [
     createFinalDeclaration(templateId, data, studentId, subfolders['05_Autorizaciones'], signature, savedFiles),
-    createPdfReport(`Resumen del formulario - ${data.fullName || studentId}`, buildSubmissionPreviewLines(data), subfolders['05_Autorizaciones'], signature)
+    createPdfReport(`Resumen del formulario - ${data.fullName || studentId}${suffix}`, buildSubmissionPreviewLines(data), subfolders['05_Autorizaciones'], signature)
   ];
 }
 
 function createFinalDeclaration(templateId, data, studentId, folder, signature, savedFiles) {
-  const title = `Declaración final - ${data.fullName || studentId}`;
+  const suffix = data.submissionId ? ' - ' + data.submissionId.slice(-10) : '';
+  const title = `Declaración final - ${data.fullName || studentId}${suffix}`;
+  const pdfName = sanitizeFileName(title) + '.pdf';
+  const existingPdf = findFileByName(folder, pdfName);
+  if (existingPdf) return { field: 'finalDeclaration', category: folder.getName(), name: existingPdf.getName(), mimeType: MimeType.PDF, size: existingPdf.getSize(), url: existingPdf.getUrl(), id: existingPdf.getId(), reused: true };
   const copy = DriveApp.getFileById(templateId).makeCopy(title, folder);
   const doc = DocumentApp.openById(copy.getId());
   const body = doc.getBody();
@@ -723,7 +994,7 @@ function createFinalDeclaration(templateId, data, studentId, folder, signature, 
   };
   Object.keys(values).forEach(key => body.replaceText('\\{\\{' + key + '\\}\\}', String(values[key] || '')));
   doc.saveAndClose();
-  const pdf = folder.createFile(copy.getAs(MimeType.PDF).setName(sanitizeFileName(title) + '.pdf'));
+  const pdf = folder.createFile(copy.getAs(MimeType.PDF).setName(pdfName));
   return { field: 'finalDeclaration', category: folder.getName(), name: pdf.getName(), mimeType: MimeType.PDF, size: pdf.getSize(), url: pdf.getUrl(), id: pdf.getId() };
 }
 
@@ -758,6 +1029,9 @@ function formatDeclarationDate(value) {
 }
 
 function createPdfReport(title, paragraphs, folder, signature) {
+  const pdfName = sanitizeFileName(title) + '.pdf';
+  const existingPdf = findFileByName(folder, pdfName);
+  if (existingPdf) return { field: 'generatedReport', category: folder.getName(), name: existingPdf.getName(), mimeType: MimeType.PDF, size: existingPdf.getSize(), url: existingPdf.getUrl(), id: existingPdf.getId(), reused: true };
   const doc = DocumentApp.create(title);
   const body = doc.getBody();
   body.appendParagraph('Casa de las Estrellas').setHeading(DocumentApp.ParagraphHeading.TITLE);
@@ -770,7 +1044,7 @@ function createPdfReport(title, paragraphs, folder, signature) {
   }
   doc.saveAndClose();
   const source = DriveApp.getFileById(doc.getId());
-  const pdf = folder.createFile(source.getAs(MimeType.PDF).setName(sanitizeFileName(title) + '.pdf'));
+  const pdf = folder.createFile(source.getAs(MimeType.PDF).setName(pdfName));
   source.setTrashed(true);
   return { field: 'generatedReport', category: folder.getName(), name: pdf.getName(), mimeType: MimeType.PDF, size: pdf.getSize(), url: pdf.getUrl(), id: pdf.getId() };
 }
@@ -790,6 +1064,7 @@ function sendFamilyReports(data, reports, allFiles) {
       `Hemos recibido correctamente el formulario de ${studentName}.`,
       '',
       'El equipo de Casa de las Estrellas revisará la información y los documentos enviados. Si se requiere información adicional, nos comunicaremos con usted.',
+      data.paymentPlan === 'monthly_request' ? 'Hemos registrado su solicitud de pagos mensuales. El departamento de cuentas por cobrar revisará el caso y enviará la información o el formulario correspondiente.' : '',
       '',
       'Adjuntamos o incluimos a continuación un resumen de la información y autorizaciones registradas para su respaldo.',
       '',
@@ -817,6 +1092,14 @@ function buildInternalRecipients(props) {
   const values = [
     props.getProperty('ADMISSIONS_EMAIL') || Session.getActiveUser().getEmail(),
     props.getProperty('TEST_NOTIFICATION_EMAILS') || ''
+  ];
+  return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
+}
+
+function buildFinanceRecipients(props) {
+  const values = [
+    props.getProperty('FINANCE_EMAIL') || '',
+    props.getProperty('MONTHLY_PAYMENT_EMAIL') || ''
   ];
   return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
 }
@@ -885,6 +1168,36 @@ function buildDocumentSectionLinks(files, folder) {
     });
   });
   return lines.join('\n');
+}
+
+function sendFinanceNotificationIfNeeded(to, data, folder, sheetUrl) {
+  if (data.paymentPlan !== 'monthly_request' || !to) return;
+  const guardian = primaryGuardianSummary(data);
+  const subject = `Solicitud de pagos mensuales: ${data.fullName || data.studentId || 'Estudiante'}`;
+  const body = [
+    'Se recibió una solicitud de pagos mensuales desde el formulario de admisión.',
+    '',
+    `Estudiante: ${data.fullName || ''}`,
+    `ID estudiante: ${data.studentId || ''}`,
+    `Período escolar: ${data.schoolPeriod || ''}`,
+    `Grado actual o solicitado: ${data.currentGrade || ''}`,
+    `Tutor responsable: ${guardian.name}`,
+    `Correo del tutor: ${guardian.email}`,
+    `Teléfono: ${guardian.phone}`,
+    `Método de pago preferido: ${formatPaymentMethod(data.paymentMethod)}`,
+    `Comentario para CxC: ${data.monthlyPaymentReason || 'Sin comentario adicional'}`,
+    '',
+    `Carpeta Drive: ${folder.getUrl()}`,
+    `Google Sheet: ${sheetUrl}`,
+    '',
+    'Acción sugerida: contactar a la familia y enviar la información o formulario correspondiente para pagos mensuales.'
+  ].join('\n');
+  MailApp.sendEmail({ to, subject, body });
+}
+
+function formatPaymentMethod(value) {
+  const map = { bank_transfer: 'Transferencia bancaria', card: 'Tarjeta', cash: 'Efectivo', other: 'Otro' };
+  return map[value] || value || 'No registrado';
 }
 
 function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, reports) {
@@ -973,6 +1286,10 @@ function pickVaccines(data) {
 
 function sanitizeFileName(name) {
   return String(name).replace(/[\\/:*?"<>|#%{}~&]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function sanitizeSubmissionId(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
 }
 
 function requireProp(props, name) {

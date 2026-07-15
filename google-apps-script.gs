@@ -15,6 +15,10 @@ function doPost(e) {
   try {
     const payload = JSON.parse(e.postData.contents || '{}');
     if (payload.action === 'lookupStudent') return jsonOutput(lookupStudent(payload.studentId, payload.verificationBirthYear || payload.verificationBirthDate));
+    if (payload.action === 'syncDashboardData' || payload.action === 'getDashboardData') return jsonOutput(syncDashboardData());
+    if (payload.action === 'sendFormLink') return jsonOutput(sendFormLink(payload.student_id || payload.studentId, payload.form_type || payload.formType, payload.email, payload.public_base_url || payload.publicBaseUrl));
+    if (payload.action === 'sendFormReminder') return jsonOutput(sendFormReminder(payload.student_id || payload.studentId, payload.form_type || payload.formType, payload.email, payload.public_base_url || payload.publicBaseUrl));
+    if (payload.action === 'updatePaymentStatus') return jsonOutput(updatePaymentStatus(payload.student_id || payload.studentId, payload.payment_type || payload.paymentType, payload.status, payload));
     return jsonOutput(handleSubmission(payload));
   } catch (error) {
     logError(error);
@@ -236,6 +240,102 @@ function lookupStudent(studentId, verificationBirthYear) {
   return { ok: false, data: null, reason: foundCode ? 'verification_failed' : 'not_found' };
 }
 
+function syncDashboardData() {
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
+  ensureTabs(ss);
+  const base = sheetObjects(ss.getSheetByName('Base_Admisiones'));
+  const dashboard = sheetObjects(ss.getSheetByName('Dashboard_Admisiones'));
+  const documents = sheetObjects(ss.getSheetByName('Documentos'));
+  const pending = sheetObjects(ss.getSheetByName('Pendientes'));
+  const driveFolders = sheetObjects(ss.getSheetByName('Drive_Folders'));
+  const health = latestByStudent(sheetObjects(ss.getSheetByName('Salud')));
+  const kitchen = latestByStudent(sheetObjects(ss.getSheetByName('Cocina')));
+  const byId = {};
+  base.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) byId[id] = Object.assign(byId[id] || {}, row);
+  });
+  dashboard.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) byId[id] = Object.assign(byId[id] || {}, row);
+  });
+  driveFolders.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) byId[id] = Object.assign(byId[id] || {}, row);
+  });
+  const documentMap = groupByStudent(documents);
+  const pendingMap = groupByStudent(pending);
+  const records = Object.keys(byId).sort().map(id => dashboardRecordFromRows(id, byId[id], documentMap[id] || [], pendingMap[id] || [], health[id] || {}, kitchen[id] || {}));
+  return { ok: true, records, generatedAt: new Date() };
+}
+
+function sendFormLink(studentId, formType, email, publicBaseUrl) {
+  return sendDashboardFormEmail('link', studentId, formType, email, publicBaseUrl);
+}
+
+function sendFormReminder(studentId, formType, email, publicBaseUrl) {
+  return sendDashboardFormEmail('reminder', studentId, formType, email, publicBaseUrl);
+}
+
+function sendDashboardFormEmail(kind, studentId, formType, email, publicBaseUrl) {
+  if (!studentId || !formType) return { ok: false, error: 'Missing student_id or form_type' };
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
+  ensureTabs(ss);
+  const record = findRowObject(ss.getSheetByName('Base_Admisiones'), 'studentId', studentId) || findRowObject(ss.getSheetByName('Dashboard_Admisiones'), 'studentId', studentId) || {};
+  const to = email || record['legalGuardians.0.email'] || record.guardian_email || record.email || props.getProperty('ADMISSIONS_EMAIL') || Session.getActiveUser().getEmail();
+  if (!to) return { ok: false, error: 'Missing recipient email' };
+  const formUrl = buildPublicFormUrl(formType, publicBaseUrl, props);
+  const studentName = record.fullName || record.student_name || record.studentName || studentId;
+  const subject = kind === 'reminder' ? `Recordatorio de formulario - Casa de las Estrellas` : `Formulario Casa de las Estrellas`;
+  const body = [
+    'Hola,',
+    '',
+    kind === 'reminder' ? 'Le recordamos completar el siguiente formulario:' : 'Por favor complete el siguiente formulario:',
+    '',
+    formUrl,
+    '',
+    `Estudiante: ${studentName}`,
+    `Código: ${studentId}`,
+    '',
+    'Gracias,',
+    'Casa de las Estrellas'
+  ].join('\n');
+  MailApp.sendEmail({ to, subject, body });
+  const update = kind === 'reminder'
+    ? { studentId, last_reminder_sent_at: new Date(), next_action: 'Recordatorio enviado' }
+    : { studentId, last_form_link_sent: formType, last_form_link_sent_at: new Date(), last_form_link_url: formUrl, next_action: 'Formulario enviado' };
+  upsertObject(ss.getSheetByName('Dashboard_Admisiones'), update, 'studentId');
+  appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: kind === 'reminder' ? 'dashboard_form_reminder_sent' : 'dashboard_form_link_sent', studentId, formType, emailTo: to });
+  return { ok: true, url: formUrl, email_to: to };
+}
+
+function updatePaymentStatus(studentId, paymentType, status, data) {
+  if (!studentId) return { ok: false, error: 'Missing student_id' };
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
+  ensureTabs(ss);
+  const update = {
+    studentId,
+    enrollmentPayment: status || 'Actualizado',
+    paymentType: paymentType || '',
+    paymentUpdatedAt: new Date(),
+    paymentNotes: data && data.notes ? data.notes : ''
+  };
+  upsertObject(ss.getSheetByName('Dashboard_Admisiones'), update, 'studentId');
+  appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'payment_status_updated', studentId, paymentType, status });
+  return { ok: true };
+}
+
+function buildPublicFormUrl(formType, publicBaseUrl, props) {
+  const configured = props.getProperty('FORM_PUBLIC_URL') || props.getProperty('STUDENT_FORM_URL') || 'https://cdecr.github.io/studentprofileform/';
+  if (formType === 'application' || formType === 'reenrollment' || formType === 'documents' || formType === 'legal') return configured;
+  const base = publicBaseUrl || configured;
+  if (/studentprofileform\/?$/i.test(base)) return configured;
+  return String(base).replace(/admin\.html.*$/,'') + 'forms.html?form=' + encodeURIComponent(formType || 'inquiry');
+}
+
 function legacyValue(headers, row, names) {
   const index = findHeaderIndex(headers, names);
   return index >= 0 ? String(row[index] || '').trim() : '';
@@ -413,6 +513,117 @@ function findRowObject(sheet, key, value) {
     }
   }
   return null;
+}
+
+function sheetObjects(sheet) {
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return [];
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(String);
+  return values.slice(1).map(row => {
+    const obj = {};
+    headers.forEach((header, index) => {
+      if (header) obj[header] = row[index];
+    });
+    return obj;
+  });
+}
+
+function latestByStudent(rows) {
+  const map = {};
+  rows.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (id) map[id] = Object.assign(map[id] || {}, row);
+  });
+  return map;
+}
+
+function groupByStudent(rows) {
+  const map = {};
+  rows.forEach(row => {
+    const id = dashboardStudentId(row);
+    if (!id) return;
+    if (!map[id]) map[id] = [];
+    map[id].push(row);
+  });
+  return map;
+}
+
+function dashboardStudentId(row) {
+  return String(row.studentId || row.student_id || row.codigo_unico_nuevo || row.dashboard_key || '').trim().toUpperCase();
+}
+
+function dashboardRecordFromRows(studentId, row, documents, pending, health, kitchen) {
+  const guardian = primaryGuardianSummary(row);
+  const fullName = row.fullName || row.legalFullName || [row.firstName, row.lastName1, row.lastName2].filter(Boolean).join(' ') || row.student_name || '';
+  const pendingText = pending.map(item => item.pendingDocument || item.status || '').filter(Boolean).join(', ') || row.missingDocuments || row.documentsPending || '';
+  const documentText = documents.map(item => item.name || item.file_name || item.field || '').filter(Boolean).join(', ');
+  const status = normalizeDashboardStatus(row.status || row.current_status || row.entryType || 'En proceso');
+  return Object.assign({}, row, {
+    student_id: studentId,
+    codigo_unico_nuevo: studentId,
+    dashboard_key: studentId + '_' + (row.schoolPeriod || row.school_year || ''),
+    student_name: fullName,
+    student_names: fullName,
+    student_initials: initialsForName(fullName),
+    grade: row.currentGrade || row.grade || row.lastGrade || '',
+    current_status: status,
+    record_type: row.entryType === 'new' ? 'Interesado' : 'Estudiante',
+    guardian_name: guardian.name || row.completedBy || '',
+    guardian_email: guardian.email || '',
+    guardian_phone: guardian.phone || '',
+    photo_preview_url: firstDocumentUrl(documents, ['studentPhoto']),
+    folder_url: row.folderUrl || row.studentFolderUrl || '',
+    studentFolderUrl: row.studentFolderUrl || row.folderUrl || '',
+    documents_summary: documentText,
+    pending_documents: pendingText,
+    needs_review: pendingText,
+    alergias_o_dieta: kitchen.food_allergy_or_restriction || kitchen.foods_to_avoid || health.allergyDetail || '',
+    idioma_principal: row.firstLanguage || row.idioma_principal || '',
+    nacionalidad_pais: row.citizenship || row.nacionalidad_pais || '',
+    identificacion_numerica: row.idNumber || row.identificacion_numerica || '',
+    fecha_nacimiento_dd_mm_yyyy: formatDashboardDate(row.birthDate),
+    'fecha_nacimiento_dd/mm/yyyy': formatDashboardDate(row.birthDate),
+    dia: datePart(row.birthDate, 'day'),
+    mes: datePart(row.birthDate, 'month'),
+    yyyy: datePart(row.birthDate, 'year'),
+    last_form_link_sent: row.last_form_link_sent || '',
+    last_form_link_sent_at: row.last_form_link_sent_at || '',
+    last_reminder_sent_at: row.last_reminder_sent_at || '',
+    next_action: row.next_action || row.followUp || ''
+  });
+}
+
+function normalizeDashboardStatus(value) {
+  const text = String(value || '').toLowerCase();
+  if (/matr[ií]cula completada|matriculado|confirmado|aprobado/.test(text)) return 'Matriculado';
+  if (/pendiente|documento|confirmar/.test(text)) return 'Pendiente de confirmar';
+  if (/inactivo|retirado/.test(text)) return 'Inactivo';
+  return 'En proceso';
+}
+
+function initialsForName(name) {
+  return String(name || '').split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase();
+}
+
+function firstDocumentUrl(documents, fields) {
+  const found = (documents || []).find(item => fields.indexOf(item.field) >= 0);
+  return found ? (found.url || found.file_url || '') : '';
+}
+
+function formatDashboardDate(value) {
+  const iso = normalizeDateValue(value);
+  if (!iso) return '';
+  const parts = iso.split('-');
+  return [parts[2], parts[1], parts[0]].join('/');
+}
+
+function datePart(value, part) {
+  const iso = normalizeDateValue(value);
+  if (!iso) return '';
+  const parts = iso.split('-');
+  if (part === 'day') return parts[2];
+  if (part === 'month') return parts[1];
+  return parts[0];
 }
 
 function ensureTabs(ss) {
