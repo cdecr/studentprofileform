@@ -56,6 +56,7 @@ Inside it, Apps Script creates:
 - `04_Vacunas`
 - `05_Autorizaciones`
 - `06_Contrato y matrícula`
+- `07_Buseta`
 - `08_Otros documentos`
 
 ## 4. Configure Apps Script
@@ -71,6 +72,7 @@ Inside it, Apps Script creates:
 | `SPREADSHEET_ID` | Google Sheet ID |
 | `DRIVE_ROOT_FOLDER_ID` | Drive admissions root folder ID |
 | `ADMISSIONS_EMAIL` | Email or comma-separated emails for notifications |
+| `TEST_NOTIFICATION_EMAILS` | Optional comma-separated emails for testing, for example Kelly and Dayana |
 | `SCHOOL_NAME` | Casa de las Estrellas |
 | `DECLARATION_TEMPLATE_ID` | ID del Google Doc creado desde `Template_declaracion_final_CDE.docx` |
 
@@ -82,6 +84,8 @@ For the legal declaration template:
 4. Save that ID as the `DECLARATION_TEMPLATE_ID` Script Property.
 
 Apps Script creates a new declaration copy for each student, fills the template markers, inserts the captured signature, and stores the completed Google Doc and PDF in `05_Autorizaciones`.
+
+Apps Script creates new Google Sheets columns automatically when needed. The latest version adds: `student_id_expiration_date`, `guardian1_id_expiration_date`, `guardian2_id_expiration_date`, `kitchen_general_note`, `guardian1_id_file_url`, `guardian2_id_file_url`, `guardian2_id_not_applicable`, `vaccination_document_url`, `vaccination_document_not_applicable`, `vaccination_notes_or_declaration`, `final_declaration_url`, `parent_confirmation_email_sent`, and `internal_notification_email_sent`.
 
 ## 5. Deploy the Apps Script Web App
 

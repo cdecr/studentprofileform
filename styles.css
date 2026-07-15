@@ -141,6 +141,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 3px s
 .signature-pad canvas { width: 100%; aspect-ratio: 45 / 13; min-height: 150px; max-height: 260px; border: 1px solid #c8dce1; border-radius: 8px; background: #fff; touch-action: none; }
 .signature-pad .remove-btn { justify-self: start; }
 .info-box { grid-column: 1 / -1; border-left: 4px solid var(--gold); background: #fff9e8; padding: 13px 14px; border-radius: 8px; color: #5d4d21; }
+.form-subsection { grid-column: 1 / -1; margin: 8px 0 0; padding: 10px 0 4px; border-top: 1px solid var(--line); }
+.form-subsection:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.form-subsection h3 { margin: 0; color: var(--accent-dark); font-size: 1rem; line-height: 1.2; }
 .conditional.hidden, .hidden { display: none !important; }
 .error-text { color: #9d332d; font-size: .82rem; }
 .field.invalid input, .field.invalid select, .field.invalid textarea { border-color: #b8453d; background: #fff8f7; }

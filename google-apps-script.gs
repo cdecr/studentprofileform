@@ -5,6 +5,7 @@ const SUBFOLDERS = [
   '04_Vacunas',
   '05_Autorizaciones',
   '06_Contrato y matrícula',
+  '07_Buseta',
   '08_Otros documentos'
 ];
 
@@ -29,7 +30,7 @@ function handleSubmission(payload) {
   const props = PropertiesService.getScriptProperties();
   const spreadsheetId = requireProp(props, 'SPREADSHEET_ID');
   const rootFolderId = requireProp(props, 'DRIVE_ROOT_FOLDER_ID');
-  const admissionsEmail = props.getProperty('ADMISSIONS_EMAIL') || Session.getActiveUser().getEmail();
+  const admissionsEmail = buildInternalRecipients(props);
   const ss = SpreadsheetApp.openById(spreadsheetId);
   ensureTabs(ss);
 
@@ -39,6 +40,7 @@ function handleSubmission(payload) {
   assertNoDuplicateProfile(ss.getSheetByName('Base_Admisiones'), data, studentId);
   const fullName = data.legalFullName || data.fullName || [data.firstName, data.secondName, data.lastName1, data.lastName2].filter(Boolean).join(' ') || 'Estudiante';
   data.fullName = fullName;
+  applySubmissionAliases(data);
 
   const root = DriveApp.getFolderById(rootFolderId);
   const folderName = sanitizeFileName(fullName + ' - ' + studentId);
@@ -47,6 +49,8 @@ function handleSubmission(payload) {
   const savedFiles = saveFiles(payload.files || [], subfolders);
   const reportFiles = createFamilyReports(data, studentId, subfolders, savedFiles);
   reportFiles.forEach(file => savedFiles.push(file));
+  const finalDeclaration = reportFiles.filter(file => file.field === 'finalDeclaration')[0];
+  data.final_declaration_url = finalDeclaration ? finalDeclaration.url : '';
   const pendingDocs = getPendingDocuments(data, savedFiles, ss, studentId);
 
   const baseRow = buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs);
@@ -54,7 +58,7 @@ function handleSubmission(payload) {
   appendDocuments(ss.getSheetByName('Documentos'), studentId, savedFiles);
   appendObject(ss.getSheetByName('Salud'), pickHealth(data));
   appendObject(ss.getSheetByName('Cocina'), pickDiet(data));
-  appendObject(ss.getSheetByName('Autorizaciones'), pick(data, ['studentId','fullName','confirmTruth','confirmDataUse','confirmContact','imageChoice','confirmRead','confirmNoGuarantee','confirmSubmit','completedBy','completedByRelation','submissionDate','digitalSignature','reviewConfirmed']));
+  appendObject(ss.getSheetByName('Autorizaciones'), pick(data, ['studentId','fullName','confirmTruth','confirmDataUse','confirmContact','imageChoice','completedBy','completedByRelation','submissionDate','digitalSignature','reviewConfirmed']));
   appendObject(ss.getSheetByName('Vacunas'), pickVaccines(data));
   appendPending(ss.getSheetByName('Pendientes'), studentId, pendingDocs);
   upsertObject(ss.getSheetByName('Drive_Folders'), { studentId, fullName, folderName: studentFolder.getName(), folderUrl: studentFolder.getUrl(), updatedAt: new Date() }, 'studentId');
@@ -63,11 +67,14 @@ function handleSubmission(payload) {
   appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: data.entryType === 'existing' ? 'profile_updated' : 'submission_created', studentId, fullName, files: savedFiles.length });
 
   sendNotification(admissionsEmail, data, studentFolder, savedFiles, pendingDocs, ss.getUrl(), reportFiles);
+  data.internal_notification_email_sent = new Date();
   try {
-    sendFamilyReports(data, reportFiles);
+    sendFamilyReports(data, reportFiles, savedFiles);
+    data.parent_confirmation_email_sent = new Date();
   } catch (familyEmailError) {
     appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'family_report_email_error', studentId, message: String(familyEmailError) });
   }
+  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent']), 'studentId');
   return { ok: true, studentId, folderUrl: studentFolder.getUrl(), files: savedFiles.length, pending: pendingDocs };
 }
 
@@ -459,12 +466,29 @@ function saveFiles(files, subfolders) {
 
 function buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs) {
   const row = Object.assign({}, data);
+  savedFiles.forEach(function(file) {
+    if (file.field === 'guardian1IdFile') row.guardian1_id_file_url = file.url || '';
+    if (file.field === 'guardian2IdFile') row.guardian2_id_file_url = file.url || '';
+    if (file.field === 'vaccineDocs') row.vaccination_document_url = file.url || '';
+    if (file.field === 'finalDeclaration') row.final_declaration_url = file.url || row.final_declaration_url || '';
+  });
   row.submittedAt = payload.submittedAt || new Date();
   row.language = payload.language || '';
   row.studentFolderUrl = studentFolder.getUrl();
   row.documentsReceived = savedFiles.map(f => f.field + ': ' + f.name).join('\n');
   row.documentsPending = pendingDocs.join('\n');
   return row;
+}
+
+function applySubmissionAliases(data) {
+  data.student_id_expiration_date = data.student_id_expiration_date || '';
+  data.guardian1_id_expiration_date = data['legalGuardians.0.idExpirationDate'] || '';
+  data.guardian2_id_expiration_date = data['legalGuardians.1.idExpirationDate'] || '';
+  data.guardian2_id_not_applicable = data.guardian2IdNotApplicable || '';
+  data.vaccination_document_not_applicable = data.vaccineDocsNA || '';
+  data.vaccination_notes_or_declaration = data.vaccineComments || '';
+  data.parent_confirmation_email_sent = data.parent_confirmation_email_sent || '';
+  data.internal_notification_email_sent = data.internal_notification_email_sent || '';
 }
 
 function appendDocuments(sheet, studentId, files) {
@@ -566,14 +590,20 @@ function getPendingDocuments(data, files, ss, studentId) {
   const present = {};
   files.forEach(f => present[f.field] = true);
   getExistingDocumentFields(ss, studentId).forEach(field => present[field] = true);
-  const required = {
-    studentIdFile: 'Identificación o pasaporte del estudiante',
-    studentPhoto: 'Foto reciente del estudiante',
-    guardianIdFiles: 'Identificación de madre, padre o tutor legal',
-    birthCertificate: 'Certificado de nacimiento',
-    vaccineDocs: 'Carné de vacunas o consentimiento/declaración firmada'
-  };
-  return Object.keys(required).filter(field => !present[field] && data[field] !== 'yes').map(field => required[field]);
+  const pending = [];
+  if (!present.studentIdFile) pending.push('Identificación o pasaporte del estudiante');
+  if (!present.studentPhoto) pending.push('Foto reciente del estudiante');
+  if (!present.guardian1IdFile && !present.guardianIdFiles) pending.push('Identificación del tutor legal 1');
+  if (hasSecondGuardian(data) && !present.guardian2IdFile && !present.guardianIdFiles && data.guardian2IdNotApplicable !== 'yes') pending.push('Identificación del tutor legal 2');
+  if (!present.birthCertificate) pending.push('Certificado de nacimiento');
+  if (!present.vaccineDocs && data.vaccineDocsNA !== 'yes') pending.push('Carné de vacunas o consentimiento/declaración firmada');
+  return pending;
+}
+
+function hasSecondGuardian(data) {
+  return ['firstName','lastName1','idNumber','email','phone'].some(function(key) {
+    return String(data['legalGuardians.1.' + key] || '').trim();
+  });
 }
 
 function getExistingDocumentFields(ss, studentId) {
@@ -631,6 +661,8 @@ function inferDocumentField(fileName, category) {
   if (/vacuna|inmunizacion|carnet/.test(text)) return 'vaccineDocs';
   if (/nacimiento|birth/.test(text)) return 'birthCertificate';
   if (/foto|photo|retrato/.test(text)) return 'studentPhoto';
+  if (/tutor 1|guardian 1|madre|mama/.test(text) && /cedula|identificacion|pasaporte|id/.test(text)) return 'guardian1IdFile';
+  if (/tutor 2|guardian 2|padre/.test(text) && /cedula|identificacion|pasaporte|id/.test(text)) return 'guardian2IdFile';
   if (/mama|madre|padre|tutor|guardian/.test(text) && /cedula|identificacion|pasaporte|id/.test(text)) return 'guardianIdFiles';
   if (/migracion|dimex|visa|residencia/.test(text)) return 'migrationDocs';
   if (/medic|psicolog|terapeut|salud/.test(text) || /03 documentos medicos/.test(text)) return 'medicalDocs';
@@ -647,7 +679,10 @@ function createFamilyReports(data, studentId, subfolders, savedFiles) {
   const templateId = PropertiesService.getScriptProperties().getProperty('DECLARATION_TEMPLATE_ID');
   if (!templateId) throw new Error('Missing Script Property: DECLARATION_TEMPLATE_ID');
   const signature = savedFiles.find(file => file.field === 'digitalSignatureFile');
-  return [createFinalDeclaration(templateId, data, studentId, subfolders['05_Autorizaciones'], signature, savedFiles)];
+  return [
+    createFinalDeclaration(templateId, data, studentId, subfolders['05_Autorizaciones'], signature, savedFiles),
+    createPdfReport(`Resumen del formulario - ${data.fullName || studentId}`, buildSubmissionPreviewLines(data), subfolders['05_Autorizaciones'], signature)
+  ];
 }
 
 function createFinalDeclaration(templateId, data, studentId, folder, signature, savedFiles) {
@@ -656,11 +691,11 @@ function createFinalDeclaration(templateId, data, studentId, folder, signature, 
   const doc = DocumentApp.openById(copy.getId());
   const body = doc.getBody();
   const relation = String(data.completedByRelation || 'Representante legal');
-  const useFather = /padre/i.test(relation);
-  const adultId = useFather ? data.fatherId : data.motherId;
-  const adultEmail = useFather ? data.fatherEmail : data.motherEmail;
-  const adultPhone = useFather ? data.fatherPhone : data.motherPhone;
-  const adultAddress = useFather ? data.fatherAddressDetails : data.motherAddressDetails;
+  const guardianIndex = findCompletedByGuardianIndex(data);
+  const adultId = data['legalGuardians.' + guardianIndex + '.idNumber'] || data.motherId || data.fatherId || '';
+  const adultEmail = data['legalGuardians.' + guardianIndex + '.email'] || data.motherEmail || data.fatherEmail || '';
+  const adultPhone = [data['legalGuardians.' + guardianIndex + '.phoneCode'], data['legalGuardians.' + guardianIndex + '.phone']].filter(Boolean).join(' ') || data.motherPhone || data.fatherPhone || '';
+  const adultAddress = data['legalGuardians.' + guardianIndex + '.addressDetails'] || data.currentAddressDetails || '';
   const hasVaccineDocument = savedFiles.some(file => file.field === 'vaccineDocs');
   insertSignatureAtMarker(body, signature);
   const values = {
@@ -675,7 +710,7 @@ function createFinalDeclaration(templateId, data, studentId, folder, signature, 
     estudiante_nombre_completo: data.fullName || '',
     estudiante_codigo: studentId,
     estudiante_identificacion: data.idNumber || '',
-    imagen_autoriza_total: data.imageChoice === 'yes' ? '[X]' : '[ ]',
+    imagen_autoriza_total: data.imageChoice === 'internal_external' ? '[X]' : '[ ]',
     imagen_autoriza_interno: '[ ]',
     imagen_no_autoriza: data.imageChoice === 'no' ? '[X]' : '[ ]',
     vacunas_estado: declarationVaccineStatus(data.vaccinesUpToDate),
@@ -690,6 +725,15 @@ function createFinalDeclaration(templateId, data, studentId, folder, signature, 
   doc.saveAndClose();
   const pdf = folder.createFile(copy.getAs(MimeType.PDF).setName(sanitizeFileName(title) + '.pdf'));
   return { field: 'finalDeclaration', category: folder.getName(), name: pdf.getName(), mimeType: MimeType.PDF, size: pdf.getSize(), url: pdf.getUrl(), id: pdf.getId() };
+}
+
+function findCompletedByGuardianIndex(data) {
+  const signer = normalizeName(data.completedBy || '');
+  for (let i = 0; i < 6; i++) {
+    const name = normalizeName([data['legalGuardians.' + i + '.firstName'], data['legalGuardians.' + i + '.lastName1'], data['legalGuardians.' + i + '.lastName2']].filter(Boolean).join(' '));
+    if (signer && name && (signer === name || name.indexOf(signer) >= 0 || signer.indexOf(name) >= 0)) return i;
+  }
+  return 0;
 }
 
 function insertSignatureAtMarker(body, signature) {
@@ -731,17 +775,28 @@ function createPdfReport(title, paragraphs, folder, signature) {
   return { field: 'generatedReport', category: folder.getName(), name: pdf.getName(), mimeType: MimeType.PDF, size: pdf.getSize(), url: pdf.getUrl(), id: pdf.getId() };
 }
 
-function sendFamilyReports(data, reports) {
+function sendFamilyReports(data, reports, allFiles) {
   const recipients = getFamilyRecipientEmails(data);
   if (!recipients.length || !reports.length) return;
   const attachments = reports.map(report => DriveApp.getFileById(report.id).getBlob());
+  const adultName = data.completedBy || primaryGuardianSummary(data).name || 'familia';
+  const studentName = data.legalFullName || data.fullName || 'el/la estudiante';
   MailApp.sendEmail({
     to: recipients.join(','),
-    subject: `Resumen de admisión - ${data.legalFullName || data.fullName || 'Estudiante'} - Casa de las Estrellas`,
+    subject: `Confirmación de recepción del formulario — Casa de las Estrellas`,
     body: [
-      'Adjuntamos el resumen de la solicitud y las autorizaciones registradas durante el proceso de admisión. Conserve este documento para sus registros.',
+      `Estimado/a ${adultName},`,
+      '',
+      `Hemos recibido correctamente el formulario de ${studentName}.`,
+      '',
+      'El equipo de Casa de las Estrellas revisará la información y los documentos enviados. Si se requiere información adicional, nos comunicaremos con usted.',
+      '',
+      'Adjuntamos o incluimos a continuación un resumen de la información y autorizaciones registradas para su respaldo.',
       '',
       buildDeclarationSummary(data),
+      '',
+      'Documentos recibidos:',
+      (allFiles || reports).length ? (allFiles || reports).map(report => `- ${report.name}: ${report.url}`).join('\n') : '- Sin documentos registrados',
       '',
       buildNextSteps()
     ].join('\n'),
@@ -758,6 +813,14 @@ function getFamilyRecipientEmails(data) {
   return uniqueValues(recipients.map(value => String(value || '').trim().toLowerCase()).filter(Boolean));
 }
 
+function buildInternalRecipients(props) {
+  const values = [
+    props.getProperty('ADMISSIONS_EMAIL') || Session.getActiveUser().getEmail(),
+    props.getProperty('TEST_NOTIFICATION_EMAILS') || ''
+  ];
+  return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
+}
+
 function buildDeclarationSummary(data) {
   const answer = value => value === 'yes' ? 'Sí' : value === 'no' ? 'No' : 'No registrado';
   return [
@@ -765,17 +828,68 @@ function buildDeclarationSummary(data) {
     `- Información verdadera y completa: ${answer(data.confirmTruth)}`,
     `- Tratamiento de datos autorizado: ${answer(data.confirmDataUse)}`,
     `- Contacto autorizado: ${answer(data.confirmContact)}`,
-    `- Uso de imagen: ${data.imageChoice === 'yes' ? 'Autorizado' : data.imageChoice === 'no' ? 'No autorizado' : 'No registrado'}`,
-    `- Proceso leído y comprendido: ${answer(data.confirmRead)}`,
-    `- Reconoce que el envío no garantiza cupo: ${answer(data.confirmNoGuarantee)}`,
-    `- Envío aceptado para revisión: ${answer(data.confirmSubmit)}`,
+    `- Uso de imagen: ${formatImageChoice(data.imageChoice)}`,
+    `- Vacunas: ${data.vaccineDocsNA === 'yes' ? 'No aplica / requiere justificación registrada' : declarationVaccineStatus(data.vaccinesUpToDate)}`,
     `- Persona firmante: ${data.completedBy || 'No registrado'} (${data.completedByRelation || 'relación no registrada'})`,
     `- Fecha: ${formatDeclarationDate(data.submissionDate || new Date())}`
   ].join('\n');
 }
 
+function formatImageChoice(value) {
+  if (value === 'internal_external') return 'Autorizado para fines institucionales, educativos y de comunicación';
+  if (value === 'no') return 'No autorizado';
+  return 'No registrado';
+}
+
+function buildSubmissionPreviewLines(data) {
+  var skip = /signature|base64|File$/i;
+  var keys = Object.keys(data || {}).filter(function(key) {
+    return data[key] !== '' && data[key] !== null && data[key] !== undefined && !skip.test(key);
+  }).sort();
+  var rows = keys.map(function(key) {
+    return formatFieldName(key) + ': ' + formatPreviewValue(data[key]);
+  });
+  var lines = [
+    'Resumen de la información registrada en el formulario.',
+    'Estudiante: ' + (data.fullName || [data.firstName, data.lastName1, data.lastName2].filter(Boolean).join(' ') || 'No registrado'),
+    'Código: ' + (data.studentId || 'No registrado'),
+    ''
+  ];
+  return lines.concat(rows);
+}
+
+function formatPreviewValue(value) {
+  if (Array.isArray(value)) return value.join(', ');
+  if (value === 'yes') return 'Sí';
+  if (value === 'no') return 'No';
+  if (value === 'internal_external' || value === 'internal_only') return formatImageChoice(value);
+  return String(value);
+}
+
+function formatFieldName(key) {
+  return String(key).replace(/\.\d+\./g, ' ').replace(/[._]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildDocumentSectionLinks(files, folder) {
+  var byCategory = {};
+  (files || []).forEach(function(file) {
+    var category = file.category || 'Expediente';
+    if (!byCategory[category]) byCategory[category] = [];
+    byCategory[category].push(file);
+  });
+  var lines = ['Expediente digital por sección:', '- Carpeta principal: ' + folder.getUrl()];
+  Object.keys(byCategory).sort().forEach(function(category) {
+    lines.push('- ' + category + ':');
+    byCategory[category].forEach(function(file) {
+      lines.push('  - ' + file.name + ': ' + (file.url || ''));
+    });
+  });
+  return lines.join('\n');
+}
+
 function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, reports) {
   const subject = `Nueva admisión: ${data.legalFullName || data.fullName || data.firstName || 'Estudiante'} (${data.studentId})`;
+  const guardian = primaryGuardianSummary(data);
   const body = [
     'Se recibió un nuevo formulario de admisión.',
     '',
@@ -783,11 +897,17 @@ function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, report
     `ID estudiante: ${data.studentId || ''}`,
     `Período escolar: ${data.schoolPeriod || ''}`,
     `Grado actual o solicitado: ${data.currentGrade || ''}`,
-    `Encargado principal: ${data.motherName || data.fatherName || data.completedBy || ''}`,
-    `Correo del encargado: ${data.motherEmail || data.fatherEmail || ''}`,
-    `Teléfono: ${data.motherPhone || data.fatherPhone || ''}`,
+    `Tutor responsable: ${guardian.name}`,
+    `Correo del tutor: ${guardian.email}`,
+    `Teléfono: ${guardian.phone}`,
+    `Autorización de imagen: ${formatImageChoice(data.imageChoice)}`,
+    `Estado de vacunas: ${data.vaccineDocsNA === 'yes' ? 'No aplica / requiere justificación registrada' : declarationVaccineStatus(data.vaccinesUpToDate)}`,
     `Carpeta Drive: ${folder.getUrl()}`,
     `Google Sheet: ${sheetUrl}`,
+    '',
+    buildSubmissionPreviewLines(data).join('\n'),
+    '',
+    buildDocumentSectionLinks(files, folder),
     '',
     'Documentos recibidos:',
     files.length ? files.map(f => `- ${f.name}: ${f.url}`).join('\n') : '- Ninguno',
@@ -803,6 +923,13 @@ function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, report
   MailApp.sendEmail({ to, subject, body, attachments });
 }
 
+function primaryGuardianSummary(data) {
+  const name = [data['legalGuardians.0.firstName'], data['legalGuardians.0.lastName1'], data['legalGuardians.0.lastName2']].filter(Boolean).join(' ') || data.motherName || data.fatherName || data.completedBy || '';
+  const email = data['legalGuardians.0.email'] || data.motherEmail || data.fatherEmail || '';
+  const phone = [data['legalGuardians.0.phoneCode'], data['legalGuardians.0.phone']].filter(Boolean).join(' ') || data.motherPhone || data.fatherPhone || '';
+  return { name, email, phone };
+}
+
 function pick(data, keys) {
   const obj = {};
   keys.forEach(k => obj[k] = data[k] || '');
@@ -810,7 +937,7 @@ function pick(data, keys) {
 }
 
 function pickHealth(data) {
-  const obj = pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','hasMedicalCondition','medicalConditionDetail','hasAllergies','allergyDetail','takesMedication','medicationName','medicationDose','medicationFrequency','medicationNotes','hasPhysicalRestriction','physicalRestrictionDetail','hasLearningCondition','learningConditionDetail','healthOther','hospitalized','hospitalizationReasons','healthNotes']);
+  const obj = pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','hasMedicalCondition','medicalConditionDetail','hasAllergies','allergyDetail','takesMedication','medicationName','medicationReason','medicationNotes','hasPhysicalRestriction','physicalRestrictionDetail','hasLearningCondition','learningConditionDetail','hospitalized','hospitalizationReasons','healthNotes']);
   Object.keys(data).forEach(k => { if (k.indexOf('health_') === 0) obj[k] = data[k]; });
   return obj;
 }
@@ -825,7 +952,8 @@ function pickDiet(data) {
     'dairy_alternative_notes',
     'meat_alternative_notes',
     'religious_cultural_food_restrictions',
-    'kitchen_safety_instructions'
+    'kitchen_safety_instructions',
+    'kitchen_general_note'
   ]);
 }
 
@@ -840,7 +968,7 @@ function buildNextSteps() {
 }
 
 function pickVaccines(data) {
-  return pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','submissionDate','completedBy']);
+  return pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','vaccineDocsNA','vaccination_document_not_applicable','vaccination_notes_or_declaration','submissionDate','completedBy']);
 }
 
 function sanitizeFileName(name) {
