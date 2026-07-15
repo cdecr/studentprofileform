@@ -35,9 +35,9 @@ function handleSubmission(payload) {
   const spreadsheetId = requireProp(props, 'SPREADSHEET_ID');
   const rootFolderId = requireProp(props, 'DRIVE_ROOT_FOLDER_ID');
   const admissionsEmail = buildInternalRecipients(props);
-  const financeEmail = buildFinanceRecipients(props);
   const ss = SpreadsheetApp.openById(spreadsheetId);
   ensureTabs(ss);
+  assertTemplateAccessible(props);
 
   const data = payload.data || {};
   const submissionId = sanitizeSubmissionId(payload.submissionId || data.submissionId || '');
@@ -81,19 +81,12 @@ function handleSubmission(payload) {
     appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'internal_notification_email_error', studentId, submissionId, message: String(internalEmailError) });
   }
   try {
-    sendFinanceNotificationIfNeeded(financeEmail, data, studentFolder, ss.getUrl());
-    if (data.paymentPlan === 'monthly_request') data.finance_notification_email_sent = new Date();
-  } catch (financeEmailError) {
-    data.finance_notification_email_sent = 'Error: ' + String(financeEmailError);
-    appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'finance_notification_email_error', studentId, submissionId, message: String(financeEmailError) });
-  }
-  try {
     sendFamilyReports(data, reportFiles, savedFiles);
     data.parent_confirmation_email_sent = new Date();
   } catch (familyEmailError) {
     appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'family_report_email_error', studentId, message: String(familyEmailError) });
   }
-  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','submissionId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent','finance_notification_email_sent']), 'studentId');
+  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','submissionId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent']), 'studentId');
   return { ok: true, studentId, folderUrl: studentFolder.getUrl(), files: savedFiles.length, pending: pendingDocs, submissionId };
 }
 
@@ -862,7 +855,7 @@ function getPendingDocuments(data, files, ss, studentId) {
   if (!present.guardian1IdFile && !present.guardianIdFiles) pending.push('Identificación del tutor legal 1');
   if (hasSecondGuardian(data) && !present.guardian2IdFile && !present.guardianIdFiles && data.guardian2IdNotApplicable !== 'yes') pending.push('Identificación del tutor legal 2');
   if (!present.birthCertificate) pending.push('Certificado de nacimiento');
-  if (!present.vaccineDocs && data.vaccineDocsNA !== 'yes') pending.push('Carné de vacunas o consentimiento/declaración firmada');
+  if (data.vaccinesUpToDate === 'yes' && !present.vaccineDocs) pending.push('Carné de vacunas');
   return pending;
 }
 
@@ -982,7 +975,7 @@ function createFinalDeclaration(templateId, data, studentId, folder, signature, 
     estudiante_codigo: studentId,
     estudiante_identificacion: data.idNumber || '',
     imagen_autoriza_total: data.imageChoice === 'internal_external' ? '[X]' : '[ ]',
-    imagen_autoriza_interno: '[ ]',
+    imagen_autoriza_interno: data.imageChoice === 'internal_only' ? '[X]' : '[ ]',
     imagen_no_autoriza: data.imageChoice === 'no' ? '[X]' : '[ ]',
     vacunas_estado: declarationVaccineStatus(data.vaccinesUpToDate),
     vacunas_documento: hasVaccineDocument ? 'Sí, adjunto al expediente' : 'Pendiente / no adjunto',
@@ -1064,7 +1057,6 @@ function sendFamilyReports(data, reports, allFiles) {
       `Hemos recibido correctamente el formulario de ${studentName}.`,
       '',
       'El equipo de Casa de las Estrellas revisará la información y los documentos enviados. Si se requiere información adicional, nos comunicaremos con usted.',
-      data.paymentPlan === 'monthly_request' ? 'Hemos registrado su solicitud de pagos mensuales. El departamento de cuentas por cobrar revisará el caso y enviará la información o el formulario correspondiente.' : '',
       '',
       'Adjuntamos o incluimos a continuación un resumen de la información y autorizaciones registradas para su respaldo.',
       '',
@@ -1119,7 +1111,8 @@ function buildDeclarationSummary(data) {
 }
 
 function formatImageChoice(value) {
-  if (value === 'internal_external') return 'Autorizado para fines institucionales, educativos y de comunicación';
+  if (value === 'internal_only') return 'Autorizado solo para uso interno institucional, educativo, pedagógico y documental';
+  if (value === 'internal_external') return 'Autorizado para uso interno y externo, incluyendo comunicación, sitio web, redes sociales y materiales de apoyo a la misión';
   if (value === 'no') return 'No autorizado';
   return 'No registrado';
 }
@@ -1168,36 +1161,6 @@ function buildDocumentSectionLinks(files, folder) {
     });
   });
   return lines.join('\n');
-}
-
-function sendFinanceNotificationIfNeeded(to, data, folder, sheetUrl) {
-  if (data.paymentPlan !== 'monthly_request' || !to) return;
-  const guardian = primaryGuardianSummary(data);
-  const subject = `Solicitud de pagos mensuales: ${data.fullName || data.studentId || 'Estudiante'}`;
-  const body = [
-    'Se recibió una solicitud de pagos mensuales desde el formulario de admisión.',
-    '',
-    `Estudiante: ${data.fullName || ''}`,
-    `ID estudiante: ${data.studentId || ''}`,
-    `Período escolar: ${data.schoolPeriod || ''}`,
-    `Grado actual o solicitado: ${data.currentGrade || ''}`,
-    `Tutor responsable: ${guardian.name}`,
-    `Correo del tutor: ${guardian.email}`,
-    `Teléfono: ${guardian.phone}`,
-    `Método de pago preferido: ${formatPaymentMethod(data.paymentMethod)}`,
-    `Comentario para CxC: ${data.monthlyPaymentReason || 'Sin comentario adicional'}`,
-    '',
-    `Carpeta Drive: ${folder.getUrl()}`,
-    `Google Sheet: ${sheetUrl}`,
-    '',
-    'Acción sugerida: contactar a la familia y enviar la información o formulario correspondiente para pagos mensuales.'
-  ].join('\n');
-  MailApp.sendEmail({ to, subject, body });
-}
-
-function formatPaymentMethod(value) {
-  const map = { bank_transfer: 'Transferencia bancaria', card: 'Tarjeta', cash: 'Efectivo', other: 'Otro' };
-  return map[value] || value || 'No registrado';
 }
 
 function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, reports) {
@@ -1296,6 +1259,16 @@ function requireProp(props, name) {
   const value = props.getProperty(name);
   if (!value) throw new Error(`Missing Script Property: ${name}`);
   return value;
+}
+
+function assertTemplateAccessible(props) {
+  const templateId = requireProp(props, 'DECLARATION_TEMPLATE_ID');
+  try {
+    DriveApp.getFileById(templateId);
+    DocumentApp.openById(templateId);
+  } catch (error) {
+    throw new Error('No se puede acceder al template de declaración final. Revise DECLARATION_TEMPLATE_ID: debe ser el ID de un archivo Google Docs, no un .docx, y la cuenta que ejecuta Apps Script debe tener permiso de edición.');
+  }
 }
 
 function jsonOutput(obj) {
