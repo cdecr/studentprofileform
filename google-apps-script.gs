@@ -31,10 +31,13 @@ function handleSubmission(payload) {
   const spreadsheetId = requireProp(props, 'SPREADSHEET_ID');
   const rootFolderId = requireProp(props, 'DRIVE_ROOT_FOLDER_ID');
   const admissionsEmail = buildInternalRecipients(props);
+  const financeEmail = buildFinanceRecipients(props);
   const ss = SpreadsheetApp.openById(spreadsheetId);
   ensureTabs(ss);
 
   const data = payload.data || {};
+  const submissionId = sanitizeSubmissionId(payload.submissionId || data.submissionId || '');
+  data.submissionId = submissionId;
   const studentId = data.studentId || nextStudentId(ss, data.studentSince, data.birthDate);
   data.studentId = studentId;
   assertNoDuplicateProfile(ss.getSheetByName('Base_Admisiones'), data, studentId);
@@ -46,7 +49,7 @@ function handleSubmission(payload) {
   const folderName = sanitizeFileName(fullName + ' - ' + studentId);
   const studentFolder = getOrCreateStudentFolder(ss, root, studentId, folderName);
   const subfolders = getOrCreateSubfolders(studentFolder);
-  const savedFiles = saveFiles(payload.files || [], subfolders);
+  const savedFiles = saveFiles(payload.files || [], subfolders, submissionId);
   const reportFiles = createFamilyReports(data, studentId, subfolders, savedFiles);
   reportFiles.forEach(file => savedFiles.push(file));
   const finalDeclaration = reportFiles.filter(file => file.field === 'finalDeclaration')[0];
@@ -66,16 +69,28 @@ function handleSubmission(payload) {
   configureAdmissionsDashboard(ss.getSheetByName('Dashboard_Admisiones'));
   appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: data.entryType === 'existing' ? 'profile_updated' : 'submission_created', studentId, fullName, files: savedFiles.length });
 
-  sendNotification(admissionsEmail, data, studentFolder, savedFiles, pendingDocs, ss.getUrl(), reportFiles);
-  data.internal_notification_email_sent = new Date();
+  try {
+    sendNotification(admissionsEmail, data, studentFolder, savedFiles, pendingDocs, ss.getUrl(), reportFiles);
+    data.internal_notification_email_sent = new Date();
+  } catch (internalEmailError) {
+    data.internal_notification_email_sent = 'Error: ' + String(internalEmailError);
+    appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'internal_notification_email_error', studentId, submissionId, message: String(internalEmailError) });
+  }
+  try {
+    sendFinanceNotificationIfNeeded(financeEmail, data, studentFolder, ss.getUrl());
+    if (data.paymentPlan === 'monthly_request') data.finance_notification_email_sent = new Date();
+  } catch (financeEmailError) {
+    data.finance_notification_email_sent = 'Error: ' + String(financeEmailError);
+    appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'finance_notification_email_error', studentId, submissionId, message: String(financeEmailError) });
+  }
   try {
     sendFamilyReports(data, reportFiles, savedFiles);
     data.parent_confirmation_email_sent = new Date();
   } catch (familyEmailError) {
     appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'family_report_email_error', studentId, message: String(familyEmailError) });
   }
-  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent']), 'studentId');
-  return { ok: true, studentId, folderUrl: studentFolder.getUrl(), files: savedFiles.length, pending: pendingDocs };
+  upsertObject(ss.getSheetByName('Base_Admisiones'), pick(data, ['studentId','submissionId','final_declaration_url','parent_confirmation_email_sent','internal_notification_email_sent','finance_notification_email_sent']), 'studentId');
+  return { ok: true, studentId, folderUrl: studentFolder.getUrl(), files: savedFiles.length, pending: pendingDocs, submissionId };
 }
 
 function lookupStudent(studentId, verificationBirthYear) {
@@ -446,11 +461,26 @@ function getOrCreateStudentFolder(ss, root, studentId, folderName) {
   return root.createFolder(folderName);
 }
 
-function saveFiles(files, subfolders) {
+function saveFiles(files, subfolders, submissionId) {
   return files.map(file => {
     const category = SUBFOLDERS.indexOf(file.category) >= 0 ? file.category : '08_Otros documentos';
+    const prefix = submissionId ? submissionId.slice(-10) + ' - ' : '';
+    const fileName = sanitizeFileName(prefix + (file.name || 'archivo'));
+    const existingFile = findFileByName(subfolders[category], fileName);
+    if (existingFile) {
+      return {
+        field: file.field,
+        category,
+        name: existingFile.getName(),
+        mimeType: file.mimeType,
+        size: existingFile.getSize(),
+        url: existingFile.getUrl(),
+        id: existingFile.getId(),
+        reused: true
+      };
+    }
     const bytes = Utilities.base64Decode(file.base64);
-    const blob = Utilities.newBlob(bytes, file.mimeType || 'application/octet-stream', sanitizeFileName(file.name || 'archivo'));
+    const blob = Utilities.newBlob(bytes, file.mimeType || 'application/octet-stream', fileName);
     const driveFile = subfolders[category].createFile(blob);
     return {
       field: file.field,
@@ -464,6 +494,11 @@ function saveFiles(files, subfolders) {
   });
 }
 
+function findFileByName(folder, fileName) {
+  const files = folder.getFilesByName(fileName);
+  return files.hasNext() ? files.next() : null;
+}
+
 function buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs) {
   const row = Object.assign({}, data);
   savedFiles.forEach(function(file) {
@@ -473,6 +508,7 @@ function buildBaseRow(payload, data, studentFolder, savedFiles, pendingDocs) {
     if (file.field === 'finalDeclaration') row.final_declaration_url = file.url || row.final_declaration_url || '';
   });
   row.submittedAt = payload.submittedAt || new Date();
+  row.submissionId = data.submissionId || payload.submissionId || '';
   row.language = payload.language || '';
   row.studentFolderUrl = studentFolder.getUrl();
   row.documentsReceived = savedFiles.map(f => f.field + ': ' + f.name).join('\n');
@@ -492,7 +528,26 @@ function applySubmissionAliases(data) {
 }
 
 function appendDocuments(sheet, studentId, files) {
-  files.forEach(file => appendObject(sheet, Object.assign({ studentId, uploadedAt: new Date() }, file)));
+  files.forEach(file => {
+    if (!documentRowExists(sheet, studentId, file)) appendObject(sheet, Object.assign({ studentId, uploadedAt: new Date() }, file));
+  });
+}
+
+function documentRowExists(sheet, studentId, file) {
+  if (!sheet || sheet.getLastRow() < 2) return false;
+  const values = sheet.getDataRange().getDisplayValues();
+  const headers = values[0];
+  const studentIndex = headers.indexOf('studentId');
+  const fieldIndex = headers.indexOf('field');
+  const idIndex = headers.indexOf('id');
+  const nameIndex = headers.indexOf('name');
+  if (studentIndex < 0) return false;
+  return values.slice(1).some(row => {
+    const sameStudent = String(row[studentIndex] || '').trim().toUpperCase() === String(studentId || '').trim().toUpperCase();
+    const sameId = idIndex >= 0 && file.id && String(row[idIndex] || '') === String(file.id);
+    const sameFieldName = fieldIndex >= 0 && nameIndex >= 0 && String(row[fieldIndex] || '') === String(file.field || '') && String(row[nameIndex] || '') === String(file.name || '');
+    return sameStudent && (sameId || sameFieldName);
+  });
 }
 
 function appendPending(sheet, studentId, pendingDocs) {
@@ -679,14 +734,19 @@ function createFamilyReports(data, studentId, subfolders, savedFiles) {
   const templateId = PropertiesService.getScriptProperties().getProperty('DECLARATION_TEMPLATE_ID');
   if (!templateId) throw new Error('Missing Script Property: DECLARATION_TEMPLATE_ID');
   const signature = savedFiles.find(file => file.field === 'digitalSignatureFile');
+  const suffix = data.submissionId ? ' - ' + data.submissionId.slice(-10) : '';
   return [
     createFinalDeclaration(templateId, data, studentId, subfolders['05_Autorizaciones'], signature, savedFiles),
-    createPdfReport(`Resumen del formulario - ${data.fullName || studentId}`, buildSubmissionPreviewLines(data), subfolders['05_Autorizaciones'], signature)
+    createPdfReport(`Resumen del formulario - ${data.fullName || studentId}${suffix}`, buildSubmissionPreviewLines(data), subfolders['05_Autorizaciones'], signature)
   ];
 }
 
 function createFinalDeclaration(templateId, data, studentId, folder, signature, savedFiles) {
-  const title = `Declaración final - ${data.fullName || studentId}`;
+  const suffix = data.submissionId ? ' - ' + data.submissionId.slice(-10) : '';
+  const title = `Declaración final - ${data.fullName || studentId}${suffix}`;
+  const pdfName = sanitizeFileName(title) + '.pdf';
+  const existingPdf = findFileByName(folder, pdfName);
+  if (existingPdf) return { field: 'finalDeclaration', category: folder.getName(), name: existingPdf.getName(), mimeType: MimeType.PDF, size: existingPdf.getSize(), url: existingPdf.getUrl(), id: existingPdf.getId(), reused: true };
   const copy = DriveApp.getFileById(templateId).makeCopy(title, folder);
   const doc = DocumentApp.openById(copy.getId());
   const body = doc.getBody();
@@ -723,7 +783,7 @@ function createFinalDeclaration(templateId, data, studentId, folder, signature, 
   };
   Object.keys(values).forEach(key => body.replaceText('\\{\\{' + key + '\\}\\}', String(values[key] || '')));
   doc.saveAndClose();
-  const pdf = folder.createFile(copy.getAs(MimeType.PDF).setName(sanitizeFileName(title) + '.pdf'));
+  const pdf = folder.createFile(copy.getAs(MimeType.PDF).setName(pdfName));
   return { field: 'finalDeclaration', category: folder.getName(), name: pdf.getName(), mimeType: MimeType.PDF, size: pdf.getSize(), url: pdf.getUrl(), id: pdf.getId() };
 }
 
@@ -758,6 +818,9 @@ function formatDeclarationDate(value) {
 }
 
 function createPdfReport(title, paragraphs, folder, signature) {
+  const pdfName = sanitizeFileName(title) + '.pdf';
+  const existingPdf = findFileByName(folder, pdfName);
+  if (existingPdf) return { field: 'generatedReport', category: folder.getName(), name: existingPdf.getName(), mimeType: MimeType.PDF, size: existingPdf.getSize(), url: existingPdf.getUrl(), id: existingPdf.getId(), reused: true };
   const doc = DocumentApp.create(title);
   const body = doc.getBody();
   body.appendParagraph('Casa de las Estrellas').setHeading(DocumentApp.ParagraphHeading.TITLE);
@@ -770,7 +833,7 @@ function createPdfReport(title, paragraphs, folder, signature) {
   }
   doc.saveAndClose();
   const source = DriveApp.getFileById(doc.getId());
-  const pdf = folder.createFile(source.getAs(MimeType.PDF).setName(sanitizeFileName(title) + '.pdf'));
+  const pdf = folder.createFile(source.getAs(MimeType.PDF).setName(pdfName));
   source.setTrashed(true);
   return { field: 'generatedReport', category: folder.getName(), name: pdf.getName(), mimeType: MimeType.PDF, size: pdf.getSize(), url: pdf.getUrl(), id: pdf.getId() };
 }
@@ -790,6 +853,7 @@ function sendFamilyReports(data, reports, allFiles) {
       `Hemos recibido correctamente el formulario de ${studentName}.`,
       '',
       'El equipo de Casa de las Estrellas revisará la información y los documentos enviados. Si se requiere información adicional, nos comunicaremos con usted.',
+      data.paymentPlan === 'monthly_request' ? 'Hemos registrado su solicitud de pagos mensuales. El departamento de cuentas por cobrar revisará el caso y enviará la información o el formulario correspondiente.' : '',
       '',
       'Adjuntamos o incluimos a continuación un resumen de la información y autorizaciones registradas para su respaldo.',
       '',
@@ -817,6 +881,14 @@ function buildInternalRecipients(props) {
   const values = [
     props.getProperty('ADMISSIONS_EMAIL') || Session.getActiveUser().getEmail(),
     props.getProperty('TEST_NOTIFICATION_EMAILS') || ''
+  ];
+  return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
+}
+
+function buildFinanceRecipients(props) {
+  const values = [
+    props.getProperty('FINANCE_EMAIL') || '',
+    props.getProperty('MONTHLY_PAYMENT_EMAIL') || ''
   ];
   return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
 }
@@ -885,6 +957,36 @@ function buildDocumentSectionLinks(files, folder) {
     });
   });
   return lines.join('\n');
+}
+
+function sendFinanceNotificationIfNeeded(to, data, folder, sheetUrl) {
+  if (data.paymentPlan !== 'monthly_request' || !to) return;
+  const guardian = primaryGuardianSummary(data);
+  const subject = `Solicitud de pagos mensuales: ${data.fullName || data.studentId || 'Estudiante'}`;
+  const body = [
+    'Se recibió una solicitud de pagos mensuales desde el formulario de admisión.',
+    '',
+    `Estudiante: ${data.fullName || ''}`,
+    `ID estudiante: ${data.studentId || ''}`,
+    `Período escolar: ${data.schoolPeriod || ''}`,
+    `Grado actual o solicitado: ${data.currentGrade || ''}`,
+    `Tutor responsable: ${guardian.name}`,
+    `Correo del tutor: ${guardian.email}`,
+    `Teléfono: ${guardian.phone}`,
+    `Método de pago preferido: ${formatPaymentMethod(data.paymentMethod)}`,
+    `Comentario para CxC: ${data.monthlyPaymentReason || 'Sin comentario adicional'}`,
+    '',
+    `Carpeta Drive: ${folder.getUrl()}`,
+    `Google Sheet: ${sheetUrl}`,
+    '',
+    'Acción sugerida: contactar a la familia y enviar la información o formulario correspondiente para pagos mensuales.'
+  ].join('\n');
+  MailApp.sendEmail({ to, subject, body });
+}
+
+function formatPaymentMethod(value) {
+  const map = { bank_transfer: 'Transferencia bancaria', card: 'Tarjeta', cash: 'Efectivo', other: 'Otro' };
+  return map[value] || value || 'No registrado';
 }
 
 function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, reports) {
@@ -973,6 +1075,10 @@ function pickVaccines(data) {
 
 function sanitizeFileName(name) {
   return String(name).replace(/[\\/:*?"<>|#%{}~&]/g, '-').replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function sanitizeSubmissionId(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
 }
 
 function requireProp(props, name) {

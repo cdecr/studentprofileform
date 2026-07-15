@@ -1,0 +1,173 @@
+CASA DE LAS ESTRELLAS - FORMULARIO DE ADMISIONES VERSION FINAL 1.2
+
+1. QUE CONTIENE ESTA CARPETA
+
+Esta carpeta contiene la version limpia para subir a GitHub y actualizar Apps Script:
+
+- index.html
+- styles.css
+- app.js
+- google-apps-script.gs
+- README.md
+- Template_declaracion_final_CDE_actualizado.docx
+
+No subir archivos ZIP dentro del repositorio. Subir los archivos sueltos.
+
+
+2. ACTUALIZAR GITHUB
+
+Repositorio del formulario:
+https://github.com/cdecr/studentprofileform
+
+Pasos:
+
+1. Entrar al repositorio en GitHub.
+2. Ir a Add file > Upload files.
+3. Subir estos archivos sueltos:
+   - index.html
+   - styles.css
+   - app.js
+   - README.md
+   - google-apps-script.gs
+   - Template_declaracion_final_CDE_actualizado.docx
+4. Confirmar el commit.
+5. Esperar 1 a 3 minutos.
+6. Abrir:
+   https://cdecr.github.io/studentprofileform/
+7. Si no se ve actualizado, refrescar con Command + Shift + R.
+
+
+3. ACTUALIZAR APPS SCRIPT
+
+Web App actual:
+https://script.google.com/macros/s/AKfycbz0uqL23MCzxL4CC2VhIrXy8K9XGlPJhyzpjyrx2R-59SfdQAUjwTkivwPEL_xohHoRow/exec
+
+Pasos:
+
+1. Entrar a script.google.com.
+2. Abrir el proyecto del formulario.
+3. En Code.gs, borrar todo.
+4. Copiar y pegar todo el contenido de google-apps-script.gs.
+5. Guardar.
+6. Ir a Deploy > Manage deployments.
+7. Editar el deployment actual.
+8. En Version, seleccionar New version.
+9. Deploy.
+10. Confirmar que la URL final siga siendo la misma Web App URL.
+
+
+4. PROPIEDADES REQUERIDAS EN APPS SCRIPT
+
+En Project Settings > Script Properties, deben existir estas propiedades:
+
+SPREADSHEET_ID
+ID del Google Sheet donde se guardan las respuestas.
+
+DRIVE_ROOT_FOLDER_ID
+ID de la carpeta principal de Drive donde se crean las carpetas por estudiante.
+
+ADMISSIONS_EMAIL
+Correo o correos separados por coma para admisiones/Kelly.
+
+TEST_NOTIFICATION_EMAILS
+Correo o correos separados por coma para pruebas, por ejemplo Kelly y Dayana.
+
+FINANCE_EMAIL
+Correo de Anielka o CxC para solicitudes de pago mensual.
+
+MONTHLY_PAYMENT_EMAIL
+Opcional. Se puede usar como alias adicional para solicitudes mensuales.
+
+DECLARATION_TEMPLATE_ID
+ID del Google Doc nativo creado desde Template_declaracion_final_CDE_actualizado.docx.
+
+
+5. COMO EVITAMOS DUPLICADOS
+
+El formulario genera un submissionId por intento de envio.
+
+Si el internet falla o el navegador muestra error, pero Drive ya cargo documentos:
+
+- el borrador queda guardado en esa misma pestana del navegador;
+- al reintentar, se usa el mismo submissionId;
+- Apps Script busca los archivos/PDFs ya creados para ese intento;
+- si ya existen, los reutiliza en lugar de duplicarlos;
+- la hoja Documentos tambien valida antes de insertar filas duplicadas.
+
+Importante:
+No abrir un navegador nuevo para reintentar el mismo envio si se cayo el internet. Reintentar desde la misma pestana para conservar el borrador y el submissionId.
+
+
+6. CONECTAR EL FORMULARIO CON EL DASHBOARD
+
+El formulario y el dashboard no deben conectarse directamente entre paginas.
+Ambos deben conectarse al mismo sistema central:
+
+- mismo Google Sheet;
+- misma carpeta principal de Drive;
+- mismo Apps Script Web App.
+
+Repositorio/dashboard publico:
+https://cdecr.github.io/dashboard/
+
+Para conectarlo correctamente:
+
+1. En el dashboard, configurar la misma URL de Apps Script usada por el formulario:
+   https://script.google.com/macros/s/AKfycbz0uqL23MCzxL4CC2VhIrXy8K9XGlPJhyzpjyrx2R-59SfdQAUjwTkivwPEL_xohHoRow/exec
+
+2. El dashboard debe leer la informacion desde las pestanas:
+   - Dashboard_Admisiones
+   - Base_Admisiones
+   - Documentos
+   - Salud
+   - Cocina
+   - Pendientes
+   - Drive_Folders
+
+3. El formulario ya escribe en Dashboard_Admisiones cuando se envia una solicitud.
+
+4. Si el dashboard actual todavia no lee desde Apps Script, hay que agregar un endpoint en Apps Script, por ejemplo:
+   action: getDashboardData
+
+5. Ese endpoint debe devolver:
+   - lista de estudiantes;
+   - estado del proceso;
+   - documentos pendientes;
+   - links de Drive;
+   - datos de cocina;
+   - datos de salud;
+   - estado de pago;
+   - seguimiento interno.
+
+6. En el dashboard, cada estudiante debe abrir su perfil usando studentId como llave unica.
+
+
+7. PRUEBA RECOMENDADA
+
+1. Abrir el formulario publicado.
+2. Buscar un estudiante por codigo y ano de nacimiento.
+3. Confirmar que se prellenan los datos.
+4. Adjuntar un archivo pequeno de prueba.
+5. Enviar el formulario.
+6. Confirmar:
+   - se crea o actualiza carpeta del estudiante en Drive;
+   - se crea fila en Base_Admisiones;
+   - se actualiza Dashboard_Admisiones;
+   - se registra documento en Documentos;
+   - llega correo a admisiones;
+   - llega correo a familia;
+   - si se selecciona pago mensual, llega correo a finanzas/CxC.
+
+
+8. BORRAR VERSIONES ANTERIORES
+
+No borrar versiones anteriores hasta confirmar que esta version 1.2 funciona en:
+
+- GitHub Pages;
+- Apps Script;
+- Google Sheet;
+- Drive;
+- correos;
+- dashboard.
+
+Cuando todo este confirmado, se pueden borrar las carpetas viejas o guardarlas en una carpeta de respaldo llamada ARCHIVO_VERSIONES_ANTERIORES.
