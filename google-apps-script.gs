@@ -18,7 +18,6 @@ function doPost(e) {
     if (payload.action === 'syncDashboardData' || payload.action === 'getDashboardData') return jsonOutput(syncDashboardData());
     if (payload.action === 'sendFormLink') return jsonOutput(sendFormLink(payload.student_id || payload.studentId, payload.form_type || payload.formType, payload.email, payload.public_base_url || payload.publicBaseUrl));
     if (payload.action === 'sendFormReminder') return jsonOutput(sendFormReminder(payload.student_id || payload.studentId, payload.form_type || payload.formType, payload.email, payload.public_base_url || payload.publicBaseUrl));
-    if (payload.action === 'updatePaymentStatus') return jsonOutput(updatePaymentStatus(payload.student_id || payload.studentId, payload.payment_type || payload.paymentType, payload.status, payload));
     return jsonOutput(handleSubmission(payload));
   } catch (error) {
     logError(error);
@@ -302,23 +301,6 @@ function sendDashboardFormEmail(kind, studentId, formType, email, publicBaseUrl)
   upsertObject(ss.getSheetByName('Dashboard_Admisiones'), update, 'studentId');
   appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: kind === 'reminder' ? 'dashboard_form_reminder_sent' : 'dashboard_form_link_sent', studentId, formType, emailTo: to });
   return { ok: true, url: formUrl, email_to: to };
-}
-
-function updatePaymentStatus(studentId, paymentType, status, data) {
-  if (!studentId) return { ok: false, error: 'Missing student_id' };
-  const props = PropertiesService.getScriptProperties();
-  const ss = SpreadsheetApp.openById(requireProp(props, 'SPREADSHEET_ID'));
-  ensureTabs(ss);
-  const update = {
-    studentId,
-    enrollmentPayment: status || 'Actualizado',
-    paymentType: paymentType || '',
-    paymentUpdatedAt: new Date(),
-    paymentNotes: data && data.notes ? data.notes : ''
-  };
-  upsertObject(ss.getSheetByName('Dashboard_Admisiones'), update, 'studentId');
-  appendObject(ss.getSheetByName('Log'), { timestamp: new Date(), event: 'payment_status_updated', studentId, paymentType, status });
-  return { ok: true };
 }
 
 function buildPublicFormUrl(formType, publicBaseUrl, props) {
@@ -725,7 +707,6 @@ function applySubmissionAliases(data) {
   data.guardian1_id_expiration_date = data['legalGuardians.0.idExpirationDate'] || '';
   data.guardian2_id_expiration_date = data['legalGuardians.1.idExpirationDate'] || '';
   data.guardian2_id_not_applicable = data.guardian2IdNotApplicable || '';
-  data.vaccination_document_not_applicable = data.vaccineDocsNA || '';
   data.vaccination_notes_or_declaration = data.vaccineComments || '';
   data.parent_confirmation_email_sent = data.parent_confirmation_email_sent || '';
   data.internal_notification_email_sent = data.internal_notification_email_sent || '';
@@ -856,6 +837,7 @@ function getPendingDocuments(data, files, ss, studentId) {
   if (hasSecondGuardian(data) && !present.guardian2IdFile && !present.guardianIdFiles && data.guardian2IdNotApplicable !== 'yes') pending.push('Identificación del tutor legal 2');
   if (!present.birthCertificate) pending.push('Certificado de nacimiento');
   if (data.vaccinesUpToDate === 'yes' && !present.vaccineDocs) pending.push('Carné de vacunas');
+  if (data.vaccinesUpToDate === 'no' && !present.vaccineDocs) pending.push('Declaración jurada o consentimiento firmado de no vacunación');
   return pending;
 }
 
@@ -1088,14 +1070,6 @@ function buildInternalRecipients(props) {
   return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
 }
 
-function buildFinanceRecipients(props) {
-  const values = [
-    props.getProperty('FINANCE_EMAIL') || '',
-    props.getProperty('MONTHLY_PAYMENT_EMAIL') || ''
-  ];
-  return uniqueValues(values.join(',').split(/[,\n;]+/).map(value => String(value || '').trim().toLowerCase()).filter(Boolean)).join(',');
-}
-
 function buildDeclarationSummary(data) {
   const answer = value => value === 'yes' ? 'Sí' : value === 'no' ? 'No' : 'No registrado';
   return [
@@ -1104,7 +1078,7 @@ function buildDeclarationSummary(data) {
     `- Tratamiento de datos autorizado: ${answer(data.confirmDataUse)}`,
     `- Contacto autorizado: ${answer(data.confirmContact)}`,
     `- Uso de imagen: ${formatImageChoice(data.imageChoice)}`,
-    `- Vacunas: ${data.vaccineDocsNA === 'yes' ? 'No aplica / requiere justificación registrada' : declarationVaccineStatus(data.vaccinesUpToDate)}`,
+    `- Vacunas: ${declarationVaccineStatus(data.vaccinesUpToDate)}`,
     `- Persona firmante: ${data.completedBy || 'No registrado'} (${data.completedByRelation || 'relación no registrada'})`,
     `- Fecha: ${formatDeclarationDate(data.submissionDate || new Date())}`
   ].join('\n');
@@ -1177,7 +1151,7 @@ function sendNotification(to, data, folder, files, pendingDocs, sheetUrl, report
     `Correo del tutor: ${guardian.email}`,
     `Teléfono: ${guardian.phone}`,
     `Autorización de imagen: ${formatImageChoice(data.imageChoice)}`,
-    `Estado de vacunas: ${data.vaccineDocsNA === 'yes' ? 'No aplica / requiere justificación registrada' : declarationVaccineStatus(data.vaccinesUpToDate)}`,
+    `Estado de vacunas: ${declarationVaccineStatus(data.vaccinesUpToDate)}`,
     `Carpeta Drive: ${folder.getUrl()}`,
     `Google Sheet: ${sheetUrl}`,
     '',
@@ -1244,7 +1218,7 @@ function buildNextSteps() {
 }
 
 function pickVaccines(data) {
-  return pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','vaccineDocsNA','vaccination_document_not_applicable','vaccination_notes_or_declaration','submissionDate','completedBy']);
+  return pick(data, ['studentId','fullName','vaccinesUpToDate','vaccineComments','vaccination_notes_or_declaration','submissionDate','completedBy']);
 }
 
 function sanitizeFileName(name) {

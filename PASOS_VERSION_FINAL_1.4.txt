@@ -1,0 +1,43 @@
+PASOS PARA ACTUALIZAR FORMULARIO CDE - VERSION FINAL 1.4
+
+1. Subir a GitHub solo estos archivos del formulario:
+   - index.html
+   - styles.css
+   - app.js
+   - README.md opcional
+
+2. En Apps Script:
+   - Abrir el proyecto del formulario o crear uno nuevo.
+   - Reemplazar todo Code.gs con el contenido de google-apps-script-COPIAR-COMPLETO.gs.
+   - Guardar.
+
+3. En Project Settings > Script Properties, configurar:
+   - SPREADSHEET_ID: ID del Google Sheet donde se guardan respuestas.
+   - DRIVE_ROOT_FOLDER_ID: ID de la carpeta principal de Drive para expedientes.
+   - DECLARATION_TEMPLATE_ID: ID del template convertido a Google Docs, no .docx.
+   - ADMISSIONS_EMAIL: correo de Kelly y correos de prueba separados por coma.
+   - PUBLIC_FORM_URL: URL pública del formulario en GitHub Pages.
+
+4. Revisar el template:
+   - Subir el .docx a Drive.
+   - Abrir con Google Docs.
+   - Crear una copia como Google Docs.
+   - Copiar solo el ID de la URL del Google Doc.
+   - Pegar ese ID en DECLARATION_TEMPLATE_ID.
+   - Dar permiso de edición a la cuenta que ejecuta Apps Script.
+
+5. Deploy de Apps Script:
+   - Deploy > New deployment > Web app.
+   - Execute as: Me.
+   - Who has access: Anyone.
+   - Deploy.
+   - Copiar la URL /exec.
+
+6. En app.js:
+   - Confirmar que CONFIG.APPS_SCRIPT_URL tenga la URL /exec vigente.
+
+7. Prueba:
+   - Abrir el formulario en una ventana nueva o incógnito.
+   - Completar sección 1. Si falta un campo o adjunto obligatorio, no debe avanzar.
+   - Adjuntar documentos. Si el envío falla, el borrador queda guardado y los adjuntos no se pierden mientras no cierre o recargue la pestaña.
+   - Enviar y confirmar que llegue correo a Kelly y correos de prueba.
