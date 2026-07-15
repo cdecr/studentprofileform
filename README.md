@@ -9,5 +9,3 @@ Archivos para GitHub Pages:
 
 Archivo para Apps Script:
 - google-apps-script-COPIAR-COMPLETO.gs
-
-Importante: DECLARATION_TEMPLATE_ID debe ser el ID de un archivo Google Docs, no un .docx.
